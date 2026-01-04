@@ -21,9 +21,10 @@ import json
 import logging
 import hashlib
 from pathlib import Path
-from typing import Iterator, Optional, Any
+from typing import Iterator, Optional, Any, Union, List, Dict
 from datetime import datetime
 
+import pandas as pd
 from pydantic import ValidationError as PydanticValidationError
 
 from src.domain.ports import (
@@ -34,6 +35,7 @@ from src.domain.ports import (
     TransformationError,
     UnsupportedSourceError,
 )
+from src.domain.utils import should_use_parallel, initialize_pandarallel_if_needed
 from src.domain.golden_record import (
     GoldenRecord,
     PatientRecord,
@@ -65,15 +67,22 @@ class JSONIngester(IngestionPort):
         - Audit trail of all rejected records
     """
     
-    def __init__(self, max_record_size: int = 10 * 1024 * 1024):
+    def __init__(self, max_record_size: int = 10 * 1024 * 1024, chunk_size: int = 10000):
         """Initialize JSON ingester.
         
         Parameters:
             max_record_size: Maximum size of a single record in bytes (default: 10MB)
                             Prevents memory exhaustion from oversized records
+            chunk_size: Number of records to process per chunk (default: 10000)
+                       Larger chunks = better vectorization, but more memory usage
+                       TODO: Future enhancement - calculate optimal chunk size based on available memory
         """
         self.max_record_size = max_record_size
+        self.chunk_size = chunk_size
         self.adapter_name = "json_ingester"
+        
+        # Initialize pandarallel if needed (one-time setup)
+        initialize_pandarallel_if_needed(progress_bar=False)
     
     def can_ingest(self, source: str) -> bool:
         """Check if this adapter can handle the given source.
@@ -122,21 +131,23 @@ class JSONIngester(IngestionPort):
         
         return None
     
-    def ingest(self, source: str) -> Iterator[Result[GoldenRecord]]:
-        """Ingest JSON data and yield Result objects containing GoldenRecord.
+    def ingest(self, source: str) -> Iterator[Result[Union[GoldenRecord, pd.DataFrame]]]:
+        """Ingest JSON data and yield Result objects containing DataFrames (chunked processing).
         
-        This method implements triage logic to handle bad data gracefully:
-        1. Each record is wrapped in try/except to prevent DoS
-        2. Bad records are logged as security rejections and returned as Result.failure_result()
-        3. Pipeline continues processing valid records
-        4. Valid records are returned as Result.success_result()
+        This method uses pandas for vectorized processing:
+        1. Loads JSON data and converts to DataFrame
+        2. Processes in chunks (default: 10,000 records per chunk)
+        3. Applies vectorized PII redaction to entire chunks
+        4. Validates records per-row (required for Pydantic)
+        5. Tracks failures at chunk level for CircuitBreaker
+        6. Yields Result[pd.DataFrame] with validated, redacted data
         
         Parameters:
-            source: Path to JSON file or JSON string
+            source: Path to JSON file
         
         Yields:
-            Result[GoldenRecord]: Result object containing either:
-                - Success: Validated, PII-redacted golden record
+            Result[pd.DataFrame]: Result object containing either:
+                - Success: DataFrame with validated, PII-redacted records
                 - Failure: Error information (error message, type, details)
         
         Raises:
@@ -153,10 +164,10 @@ class JSONIngester(IngestionPort):
         
         # Check file size to prevent memory exhaustion
         file_size = source_path.stat().st_size
-        if file_size > self.max_record_size * 100:  # Allow up to 100x max_record_size for file
+        if file_size > self.max_record_size * 100:
             logger.warning(
                 f"Large JSON file detected: {source} ({file_size} bytes). "
-                "Processing may be slow."
+                "Processing in chunks for memory efficiency."
             )
         
         try:
@@ -175,85 +186,112 @@ class JSONIngester(IngestionPort):
                 source=source
             )
         
-        # Handle different JSON structures
+        # Handle different JSON structures and normalize to list
         records = self._extract_records(raw_data)
         
-        # Process each record with triage
-        record_count = 0
-        rejected_count = 0
+        if not records:
+            logger.warning(f"No records found in {source}")
+            return
         
-        for raw_record in records:
-            record_count += 1
+        # Convert to DataFrame for vectorized processing
+        try:
+            # Normalize nested JSON structure (patient, encounters, observations)
+            normalized_records = []
+            for record in records:
+                # Extract patient data (flatten nested structure)
+                patient_data = record.get('patient', {})
+                if not isinstance(patient_data, dict):
+                    continue  # Skip invalid records
+                
+                # Flatten patient data to top level
+                flat_record = patient_data.copy()
+                
+                # Add metadata
+                flat_record['_source_record_index'] = len(normalized_records)
+                flat_record['_has_encounters'] = bool(record.get('encounters'))
+                flat_record['_has_observations'] = bool(record.get('observations'))
+                
+                normalized_records.append(flat_record)
             
-            # Triage: Wrap each record in try/except to prevent DoS
+            if not normalized_records:
+                logger.warning(f"No valid patient records found in {source}")
+                return
+            
+            # Convert to DataFrame
+            df_all = pd.DataFrame(normalized_records)
+            
+        except Exception as e:
+            raise TransformationError(
+                f"Failed to convert JSON to DataFrame: {str(e)}",
+                source=source,
+                raw_data={"error": str(e)}
+            )
+        
+        # Process DataFrame in chunks
+        chunk_count = 0
+        total_processed = 0
+        total_rejected = 0
+        
+        for start_idx in range(0, len(df_all), self.chunk_size):
+            chunk_count += 1
+            end_idx = min(start_idx + self.chunk_size, len(df_all))
+            chunk_df = df_all.iloc[start_idx:end_idx].copy()
+            
             try:
-                # Check record size to prevent memory exhaustion
-                record_str = json.dumps(raw_record)
-                if len(record_str.encode('utf-8')) > self.max_record_size:
-                    error = TransformationError(
-                        f"Record {record_count} exceeds maximum size ({self.max_record_size} bytes)",
-                        source=source,
-                        raw_data={"size": len(record_str), "record_index": record_count}
+                # Apply vectorized PII redaction
+                redacted_df = self._redact_dataframe(chunk_df)
+                
+                # Validate and filter valid records
+                validated_df, failed_indices = self._validate_dataframe_chunk(
+                    redacted_df,
+                    source,
+                    chunk_count
+                )
+                
+                # Track failures
+                num_failed = len(failed_indices)
+                num_valid = len(validated_df)
+                total_processed += len(chunk_df)
+                total_rejected += num_failed
+                
+                # Log failures if any
+                if num_failed > 0:
+                    logger.warning(
+                        f"Chunk {chunk_count} from {source}: {num_failed} records failed validation, "
+                        f"{num_valid} records passed"
                     )
-                    rejected_count += 1
-                    self._log_security_rejection(
-                        source=source,
-                        record_index=record_count,
-                        error=error,
-                        raw_record=raw_record
-                    )
+                
+                # Yield success result with validated DataFrame
+                if len(validated_df) > 0:
+                    yield Result.success_result(validated_df)
+                
+                # Yield failure result if entire chunk failed
+                if num_failed == len(chunk_df) and num_valid == 0:
                     yield Result.failure_result(
-                        error,
-                        error_type="TransformationError",
+                        ValidationError(
+                            f"Chunk {chunk_count} from {source} failed validation: all {num_failed} records invalid",
+                            source=source,
+                            details={"chunk": chunk_count, "failed_count": num_failed}
+                        ),
+                        error_type="ValidationError",
                         error_details={
                             "source": source,
-                            "record_index": record_count,
-                            "size": len(record_str),
-                            "max_size": self.max_record_size
+                            "chunk": chunk_count,
+                            "failed_count": num_failed,
+                            "total_in_chunk": len(chunk_df)
                         }
                     )
-                    continue
-                
-                # Transform and validate record
-                golden_record = self._triage_and_transform(
-                    raw_record,
-                    source,
-                    record_count
-                )
-                
-                # Yield success result
-                yield Result.success_result(golden_record)
-                
-            except (ValidationError, TransformationError) as e:
-                # Security rejection: Log and return failure result
-                rejected_count += 1
-                self._log_security_rejection(
-                    source=source,
-                    record_index=record_count,
-                    error=e,
-                    raw_record=raw_record
-                )
-                yield Result.failure_result(
-                    e,
-                    error_type=type(e).__name__,
-                    error_details={
-                        "source": source,
-                        "record_index": record_count,
-                        **(e.details if hasattr(e, 'details') and e.details else {}),
-                        **(e.raw_data if hasattr(e, 'raw_data') and e.raw_data else {})
-                    }
-                )
-                continue
-                
+                    
             except Exception as e:
-                # Unexpected error: Log as security concern and return failure result
-                rejected_count += 1
+                # Chunk-level error: Log and yield failure
+                total_processed += len(chunk_df)
+                total_rejected += len(chunk_df)
                 logger.error(
-                    f"Unexpected error processing record {record_count} from {source}: {str(e)}",
+                    f"Error processing chunk {chunk_count} from {source}: {str(e)}",
                     exc_info=True,
                     extra={
                         'source': source,
-                        'record_index': record_count,
+                        'chunk': chunk_count,
                         'error_type': type(e).__name__,
                     }
                 )
@@ -262,17 +300,158 @@ class JSONIngester(IngestionPort):
                     error_type=type(e).__name__,
                     error_details={
                         "source": source,
-                        "record_index": record_count
+                        "chunk": chunk_count,
+                        "chunk_size": len(chunk_df)
                     }
                 )
                 continue
         
         # Log ingestion summary
-        if record_count > 0:
+        if total_processed > 0:
             logger.info(
                 f"JSON ingestion complete: {source} - "
-                f"{record_count - rejected_count} accepted, {rejected_count} rejected"
+                f"{total_processed - total_rejected} accepted, {total_rejected} rejected "
+                f"({chunk_count} chunks processed)"
             )
+    
+    def _redact_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Apply vectorized PII redaction to DataFrame columns.
+        
+        Note: Some fields (like postal_code) are not redacted here because
+        they need to pass pattern validation first. They will be redacted
+        by the Pydantic validators during model creation.
+        
+        Parameters:
+            df: DataFrame with patient data
+        
+        Returns:
+            DataFrame with PII fields redacted (where safe to do so)
+        """
+        df_redacted = df.copy()
+        
+        # Apply vectorized redaction to PII columns that don't have pattern constraints
+        if 'ssn' in df_redacted.columns:
+            df_redacted['ssn'] = RedactorService.redact_ssn(df_redacted['ssn'])
+        
+        if 'first_name' in df_redacted.columns:
+            df_redacted['first_name'] = RedactorService.redact_name(df_redacted['first_name'])
+        
+        if 'last_name' in df_redacted.columns:
+            df_redacted['last_name'] = RedactorService.redact_name(df_redacted['last_name'])
+        
+        if 'phone' in df_redacted.columns:
+            df_redacted['phone'] = RedactorService.redact_phone(df_redacted['phone'])
+        
+        if 'email' in df_redacted.columns:
+            df_redacted['email'] = RedactorService.redact_email(df_redacted['email'])
+        
+        if 'address_line1' in df_redacted.columns:
+            df_redacted['address_line1'] = RedactorService.redact_address(df_redacted['address_line1'])
+        
+        # Note: postal_code is NOT redacted here because it needs to pass pattern validation first
+        # It will be redacted by the Pydantic validator after validation
+        
+        # Date of birth is always redacted (set to None)
+        if 'date_of_birth' in df_redacted.columns:
+            df_redacted['date_of_birth'] = None
+        
+        return df_redacted
+    
+    def _validate_dataframe_chunk(
+        self,
+        df: pd.DataFrame,
+        source: str,
+        chunk_number: int
+    ) -> tuple[pd.DataFrame, List[int]]:
+        """Validate DataFrame chunk and return valid records + failed indices.
+        
+        Parameters:
+            df: DataFrame with redacted data
+            source: Source identifier
+            chunk_number: Chunk number for logging
+        
+        Returns:
+            Tuple of (validated DataFrame, list of failed row indices)
+        """
+        valid_records = []
+        failed_indices = []
+        
+        # Validate each row individually (required for Pydantic)
+        for idx, row in df.iterrows():
+            try:
+                # Convert row to dictionary
+                row_dict = row.to_dict()
+                
+                # Clean up NaN values and convert types
+                for key, value in row_dict.items():
+                    if pd.isna(value):
+                        row_dict[key] = None
+                    elif isinstance(value, float) and pd.isna(value):
+                        row_dict[key] = None
+                    elif key == 'postal_code' and pd.notna(value):
+                        # Convert postal_code to string
+                        row_dict[key] = str(value)
+                    elif isinstance(value, float) and not pd.isna(value) and key in ['state', 'city']:
+                        # Convert float to string for string fields
+                        row_dict[key] = str(int(value)) if value == int(value) else str(value)
+                
+                # Check for required patient_id
+                if 'patient_id' not in row_dict or pd.isna(row_dict.get('patient_id')) or not row_dict.get('patient_id'):
+                    failed_indices.append(idx)
+                    continue
+                
+                # Create PatientRecord (validates and applies additional redaction via validators)
+                patient = PatientRecord(**{k: v for k, v in row_dict.items() if k in PatientRecord.model_fields})
+                
+                # Create minimal GoldenRecord (encounters/observations empty for simplified JSON processing)
+                golden_record = GoldenRecord(
+                    patient=patient,
+                    encounters=[],
+                    observations=[],
+                    source_adapter=self.adapter_name,
+                    transformation_hash=self._generate_hash_from_row(row_dict)
+                )
+                
+                # Store validated record as dict for DataFrame reconstruction
+                # Include all fields from the validated patient record
+                patient_dict = patient.model_dump(exclude_none=False)
+                valid_records.append(patient_dict)
+                
+            except (PydanticValidationError, ValidationError, TransformationError) as e:
+                failed_indices.append(idx)
+                # Log individual failures (but don't spam logs)
+                if len(failed_indices) <= 10:  # Only log first 10 failures per chunk
+                    logger.warning(
+                        f"Record {idx} in chunk {chunk_number} from {source} failed validation: {str(e)}",
+                        extra={'source': source, 'chunk': chunk_number, 'row_index': idx}
+                    )
+            except Exception as e:
+                failed_indices.append(idx)
+                logger.error(
+                    f"Unexpected error validating record {idx} in chunk {chunk_number} from {source}: {str(e)}",
+                    exc_info=True,
+                    extra={'source': source, 'chunk': chunk_number, 'row_index': idx}
+                )
+        
+        # Create DataFrame from valid records
+        if valid_records:
+            validated_df = pd.DataFrame(valid_records)
+        else:
+            validated_df = pd.DataFrame()
+        
+        return validated_df, failed_indices
+    
+    def _generate_hash_from_row(self, row_dict: Dict[str, Any]) -> str:
+        """Generate hash from row dictionary for audit trail.
+        
+        Parameters:
+            row_dict: Row data as dictionary
+        
+        Returns:
+            str: SHA-256 hash
+        """
+        record_str = json.dumps(row_dict, sort_keys=True)
+        return hashlib.sha256(record_str.encode('utf-8')).hexdigest()
     
     def _extract_records(self, raw_data: Any) -> list[dict]:
         """Extract records from various JSON structures.

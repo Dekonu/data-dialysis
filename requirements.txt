@@ -3,4 +3,5 @@ pytest>=9.0.0
 pandas>=2.3.0
 defusedxml>=0.7.1
 hypothesis>=6.0.0
+pandarallel>=1.6.5; platform_system != "Windows"
 

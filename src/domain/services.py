@@ -19,7 +19,8 @@ Architecture:
 
 import re
 from datetime import date, datetime
-from typing import Optional
+from typing import Optional, Union
+import pandas as pd
 
 
 class RedactorService:
@@ -60,18 +61,40 @@ class RedactorService:
     DATE_MASK = "****-**-**"
     
     @staticmethod
-    def redact_ssn(value: Optional[str]) -> Optional[str]:
+    def redact_ssn(value: Union[Optional[str], 'pd.Series']) -> Union[Optional[str], 'pd.Series']:
         """Redact Social Security Number.
         
         Security Impact: Masks SSN to prevent identity theft and HIPAA violations.
         Handles both formatted (123-45-6789) and unformatted (123456789) SSNs.
+        Supports both scalar values (backward compatible) and pandas Series (vectorized).
         
         Parameters:
-            value: SSN string to redact (may contain dashes or spaces)
+            value: SSN string to redact (may contain dashes or spaces) or pandas Series
         
         Returns:
-            Redacted SSN string or None if input is None
+            Redacted SSN string/Series or None if input is None
         """
+        # Vectorized operation for pandas Series
+        if isinstance(value, pd.Series):
+            # Use vectorized string operations (fastest)
+            # Handle NaN values properly
+            result = value.copy().astype(str)
+            # Replace 'nan' strings with empty strings for processing
+            result = result.replace('nan', '')
+            
+            # Create mask for values that match SSN pattern
+            mask = result.str.contains(RedactorService.SSN_PATTERN.pattern, regex=True, na=False)
+            # Also check for 9-digit numbers without separators
+            cleaned = result.str.replace(r'[-\s]', '', regex=True)
+            nine_digit_mask = cleaned.str.isdigit() & (cleaned.str.len() == 9)
+            
+            # Apply redaction where either condition is true
+            result[mask | nine_digit_mask] = RedactorService.SSN_MASK
+            # Restore original NaN values
+            result[value.isna()] = None
+            return result
+        
+        # Scalar operation (backward compatible)
         if not value:
             return None
         
@@ -87,18 +110,29 @@ class RedactorService:
         return value
     
     @staticmethod
-    def redact_phone(value: Optional[str]) -> Optional[str]:
+    def redact_phone(value: Union[Optional[str], 'pd.Series']) -> Union[Optional[str], 'pd.Series']:
         """Redact phone number.
         
         Security Impact: Masks phone numbers to prevent contact information exposure.
         Handles various formats including (123) 456-7890, 123-456-7890, etc.
+        Supports both scalar values (backward compatible) and pandas Series (vectorized).
         
         Parameters:
-            value: Phone number string to redact
+            value: Phone number string to redact or pandas Series
         
         Returns:
-            Redacted phone number string or None if input is None
+            Redacted phone number string/Series or None if input is None
         """
+        # Vectorized operation for pandas Series
+        if isinstance(value, pd.Series):
+            result = value.copy().astype(str)
+            result = result.replace('nan', '')
+            mask = result.str.contains(RedactorService.PHONE_PATTERN.pattern, regex=True, na=False)
+            result[mask] = RedactorService.PHONE_MASK
+            result[value.isna()] = None
+            return result
+        
+        # Scalar operation (backward compatible)
         if not value:
             return None
         
@@ -109,18 +143,29 @@ class RedactorService:
         return value
     
     @staticmethod
-    def redact_email(value: Optional[str]) -> Optional[str]:
+    def redact_email(value: Union[Optional[str], 'pd.Series']) -> Union[Optional[str], 'pd.Series']:
         """Redact email address.
         
         Security Impact: Masks email addresses to prevent contact information exposure
         and reduce phishing attack vectors.
+        Supports both scalar values (backward compatible) and pandas Series (vectorized).
         
         Parameters:
-            value: Email address string to redact
+            value: Email address string to redact or pandas Series
         
         Returns:
-            Redacted email address string or None if input is None
+            Redacted email address string/Series or None if input is None
         """
+        # Vectorized operation for pandas Series
+        if isinstance(value, pd.Series):
+            result = value.copy().astype(str)
+            result = result.replace('nan', '')
+            mask = result.str.contains(RedactorService.EMAIL_PATTERN.pattern, regex=True, na=False)
+            result[mask] = RedactorService.EMAIL_MASK
+            result[value.isna()] = None
+            return result
+        
+        # Scalar operation (backward compatible)
         if not value:
             return None
         
@@ -131,18 +176,35 @@ class RedactorService:
         return value
     
     @staticmethod
-    def redact_name(value: Optional[str]) -> Optional[str]:
+    def redact_name(value: Union[Optional[str], 'pd.Series']) -> Union[Optional[str], 'pd.Series']:
         """Redact person name.
         
         Security Impact: Masks names to prevent patient identification.
         This is a basic implementation; for production, consider NLP-based NER.
+        Supports both scalar values (backward compatible) and pandas Series (vectorized).
         
         Parameters:
-            value: Name string to redact
+            value: Name string to redact or pandas Series
         
         Returns:
-            Redacted name string or None if input is None
+            Redacted name string/Series or None if input is None
         """
+        # Vectorized operation for pandas Series
+        if isinstance(value, pd.Series):
+            result = value.copy().astype(str)
+            result = result.replace('nan', '')
+            value_str = result.str.strip()
+            # Simple heuristic: if it looks like a name (capitalized, 1-3 words)
+            mask = (
+                (value_str.str.len() > 0) &
+                (value_str.str[0].str.isupper()) &
+                (value_str.str.split().str.len() <= 3)
+            )
+            result[mask] = RedactorService.NAME_MASK
+            result[value.isna()] = None
+            return result
+        
+        # Scalar operation (backward compatible)
         if not value:
             return None
         
@@ -154,17 +216,30 @@ class RedactorService:
         return value
     
     @staticmethod
-    def redact_address(value: Optional[str]) -> Optional[str]:
+    def redact_address(value: Union[Optional[str], 'pd.Series']) -> Union[Optional[str], 'pd.Series']:
         """Redact street address.
         
         Security Impact: Masks addresses to prevent location-based identification.
+        Supports both scalar values (backward compatible) and pandas Series (vectorized).
         
         Parameters:
-            value: Address string to redact
+            value: Address string to redact or pandas Series
         
         Returns:
-            Redacted address string or None if input is None
+            Redacted address string/Series or None if input is None
         """
+        # Vectorized operation for pandas Series
+        if isinstance(value, pd.Series):
+            result = value.copy().astype(str)
+            result = result.replace('nan', '')
+            value_str = result.str.strip()
+            # Addresses typically contain numbers and street names
+            mask = value_str.str.contains(r'\d', regex=True, na=False)  # Contains digits
+            result[mask] = RedactorService.ADDRESS_MASK
+            result[value.isna()] = None
+            return result
+        
+        # Scalar operation (backward compatible)
         if not value:
             return None
         
@@ -191,18 +266,33 @@ class RedactorService:
         return None
     
     @staticmethod
-    def redact_zip_code(value: Optional[str]) -> Optional[str]:
+    def redact_zip_code(value: Union[Optional[str], 'pd.Series']) -> Union[Optional[str], 'pd.Series']:
         """Partially redact ZIP code (keep first 2 digits for analytics).
         
         Security Impact: Partially masks ZIP to balance privacy with geographic
         analytics needs. Full ZIP can be used for re-identification.
+        Supports both scalar values (backward compatible) and pandas Series (vectorized).
         
         Parameters:
-            value: ZIP code string to redact
+            value: ZIP code string to redact or pandas Series
         
         Returns:
             Partially redacted ZIP (e.g., "12***") or None if input is None
         """
+        # Vectorized operation for pandas Series
+        if isinstance(value, pd.Series):
+            result = value.copy().astype(str)
+            result = result.replace('nan', '')
+            value_str = result.str.strip()
+            # Remove dashes for processing
+            cleaned = value_str.str.replace("-", "", regex=False)
+            # Keep first 2 digits, mask the rest for valid ZIP codes (5+ digits)
+            mask = cleaned.str.isdigit() & (cleaned.str.len() >= 5)
+            result[mask] = value_str[mask].str[:2] + "***"
+            result[value.isna()] = None
+            return result
+        
+        # Scalar operation (backward compatible)
         if not value:
             return None
         
@@ -217,19 +307,37 @@ class RedactorService:
         return value
     
     @staticmethod
-    def redact_unstructured_text(value: Optional[str]) -> Optional[str]:
+    def redact_unstructured_text(value: Union[Optional[str], 'pd.Series']) -> Union[Optional[str], 'pd.Series']:
         """Redact PII from unstructured text (e.g., clinical notes).
         
         Security Impact: Scans unstructured text for PII patterns and redacts them.
         This is a basic regex-based implementation. For production, consider
         NLP-based Named Entity Recognition (NER) for better accuracy.
+        Supports both scalar values (backward compatible) and pandas Series (vectorized).
         
         Parameters:
-            value: Unstructured text that may contain PII
+            value: Unstructured text that may contain PII or pandas Series
         
         Returns:
             Text with PII redacted or None if input is None
         """
+        # Vectorized operation for pandas Series
+        if isinstance(value, pd.Series):
+            result = value.astype(str).copy()
+            result = result.replace('nan', '')
+            # Redact SSNs
+            result = result.str.replace(RedactorService.SSN_PATTERN.pattern, RedactorService.SSN_MASK, regex=True)
+            # Redact phone numbers
+            result = result.str.replace(RedactorService.PHONE_PATTERN.pattern, RedactorService.PHONE_MASK, regex=True)
+            # Redact email addresses
+            result = result.str.replace(RedactorService.EMAIL_PATTERN.pattern, RedactorService.EMAIL_MASK, regex=True)
+            # Note: Name redaction in unstructured text is complex and would benefit
+            # from NLP/NER. This basic implementation may miss names or over-redact.
+            # For production, integrate with SpaCy or similar NER library.
+            result[value.isna()] = None
+            return result
+        
+        # Scalar operation (backward compatible)
         if not value:
             return None
         

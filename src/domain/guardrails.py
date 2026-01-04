@@ -18,9 +18,11 @@ Architecture:
 """
 
 import logging
-from typing import Optional
+from typing import Optional, Union
 from dataclasses import dataclass, field
 from threading import Lock
+
+import pandas as pd
 
 from src.domain.ports import Result, GoldenRecord
 
@@ -124,17 +126,18 @@ class CircuitBreaker:
         self._total_processed = 0
         self._total_failures = 0
     
-    def record_result(self, result: Result[GoldenRecord]) -> None:
+    def record_result(self, result: Result[Union[GoldenRecord, pd.DataFrame]]) -> None:
         """Record a result and check if circuit should open.
         
         This method:
         1. Records the result (success or failure)
-        2. Maintains sliding window of recent results
-        3. Checks if failure threshold is exceeded
-        4. Opens circuit if threshold exceeded
+        2. For DataFrames: Counts rows as individual records
+        3. Maintains sliding window of recent results
+        4. Checks if failure threshold is exceeded
+        5. Opens circuit if threshold exceeded
         
         Parameters:
-            result: Result from ingestion operation
+            result: Result from ingestion operation (can contain GoldenRecord or DataFrame)
         
         Raises:
             CircuitBreakerOpenError: If abort_on_open=True and threshold exceeded
@@ -142,18 +145,33 @@ class CircuitBreaker:
         with self._lock:
             # Record result
             is_success = result.is_success()
-            self._results.append(is_success)
-            self._total_processed += 1
             
-            if not is_success:
-                self._total_failures += 1
+            # Handle DataFrame chunks (count rows as individual records)
+            if is_success and isinstance(result.value, pd.DataFrame):
+                num_rows = len(result.value)
+                # Add one entry per row in the DataFrame
+                for _ in range(num_rows):
+                    self._results.append(True)
+                    self._total_processed += 1
+            elif not is_success:
+                # Failure: Check if error_details contains chunk info
+                chunk_size = result.error_details.get('chunk_size', 1) if result.error_details else 1
+                # For chunk failures, count all rows in chunk as failures
+                for _ in range(chunk_size):
+                    self._results.append(False)
+                    self._total_processed += 1
+                    self._total_failures += 1
+            else:
+                # Single GoldenRecord success
+                self._results.append(True)
+                self._total_processed += 1
             
-            # Maintain sliding window
-            if len(self._results) > self.config.window_size:
+            # Maintain sliding window (remove oldest entries if window exceeds size)
+            while len(self._results) > self.config.window_size:
                 removed = self._results.pop(0)
-                if not removed:
-                    # Adjust failure count if we removed a failure
-                    self._total_failures = max(0, self._total_failures - 1)
+                # Note: We don't adjust _total_failures here because it tracks
+                # total failures ever seen, not just failures in the window.
+                # failures_in_window is calculated from the window itself.
             
             # Check threshold (only after minimum records processed)
             if self._total_processed >= self.config.min_records_before_check:

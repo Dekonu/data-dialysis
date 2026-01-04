@@ -23,9 +23,10 @@ import csv
 import logging
 import hashlib
 from pathlib import Path
-from typing import Iterator, Optional, Dict, Any, List
+from typing import Iterator, Optional, Dict, Any, List, Union
 from datetime import datetime
 
+import pandas as pd
 from pydantic import ValidationError as PydanticValidationError
 
 from src.domain.ports import (
@@ -36,6 +37,7 @@ from src.domain.ports import (
     TransformationError,
     UnsupportedSourceError,
 )
+from src.domain.utils import should_use_parallel, initialize_pandarallel_if_needed
 from src.domain.golden_record import (
     GoldenRecord,
     PatientRecord,
@@ -86,7 +88,8 @@ class CSVIngester(IngestionPort):
         column_mapping: Optional[Dict[str, str]] = None,
         has_header: bool = True,
         delimiter: str = ',',
-        max_record_size: int = 10 * 1024 * 1024
+        max_record_size: int = 10 * 1024 * 1024,
+        chunk_size: int = 10000
     ):
         """Initialize CSV ingester.
         
@@ -97,12 +100,19 @@ class CSVIngester(IngestionPort):
             delimiter: CSV delimiter character (default: ',', also supports '\t', ';', '|')
             max_record_size: Maximum size of a single record in bytes (default: 10MB)
                             Prevents memory exhaustion from oversized records
+            chunk_size: Number of rows to process per chunk (default: 10000)
+                       Larger chunks = better vectorization, but more memory usage
+                       TODO: Future enhancement - calculate optimal chunk size based on available memory
         """
         self.column_mapping = column_mapping or {}
         self.has_header = has_header
         self.delimiter = delimiter
         self.max_record_size = max_record_size
+        self.chunk_size = chunk_size
         self.adapter_name = "csv_ingester"
+        
+        # Initialize pandarallel if needed (one-time setup)
+        initialize_pandarallel_if_needed(progress_bar=False)
     
     def can_ingest(self, source: str) -> bool:
         """Check if this adapter can handle the given source.
@@ -156,21 +166,22 @@ class CSVIngester(IngestionPort):
         
         return None
     
-    def ingest(self, source: str) -> Iterator[Result[GoldenRecord]]:
-        """Ingest CSV data and yield Result objects containing GoldenRecord.
+    def ingest(self, source: str) -> Iterator[Result[Union[GoldenRecord, pd.DataFrame]]]:
+        """Ingest CSV data and yield Result objects containing DataFrames (chunked processing).
         
-        This method implements triage logic to handle bad data gracefully:
-        1. Each record is wrapped in try/except to prevent DoS
-        2. Bad records are logged as security rejections and returned as Result.failure_result()
-        3. Pipeline continues processing valid records
-        4. Valid records are returned as Result.success_result()
+        This method uses pandas chunked reading for vectorized processing:
+        1. Reads CSV in chunks (default: 10,000 rows per chunk)
+        2. Applies vectorized PII redaction to entire chunks
+        3. Validates records per-row (required for Pydantic)
+        4. Tracks failures at chunk level for CircuitBreaker
+        5. Yields Result[pd.DataFrame] with validated, redacted data
         
         Parameters:
             source: Path to CSV file
         
         Yields:
-            Result[GoldenRecord]: Result object containing either:
-                - Success: Validated, PII-redacted golden record
+            Result[pd.DataFrame]: Result object containing either:
+                - Success: DataFrame with validated, PII-redacted records
                 - Failure: Error information (error message, type, details)
         
         Raises:
@@ -193,163 +204,147 @@ class CSVIngester(IngestionPort):
         if file_size > self.max_record_size * 100:
             logger.warning(
                 f"Large CSV file detected: {source} ({file_size} bytes). "
-                "Processing may be slow."
+                "Processing in chunks for memory efficiency."
             )
         
         try:
-            # Detect delimiter if not specified
-            if delimiter == ',':
-                # Try to auto-detect delimiter from first line
-                with open(source_path, 'r', encoding='utf-8', newline='') as sample_file:
-                    sample = sample_file.read(1024)
-                    sniffer = csv.Sniffer()
-                    try:
-                        detected_delimiter = sniffer.sniff(sample, delimiters=',;\t|').delimiter
-                        delimiter = detected_delimiter
-                    except:
-                        delimiter = ','  # Default to comma
+            # Read first chunk to detect column mapping
+            first_chunk = pd.read_csv(
+                source_path,
+                nrows=1,
+                delimiter=delimiter,
+                header=0 if self.has_header else None,
+                encoding='utf-8',
+                low_memory=False
+            )
             
-            # Open CSV file with appropriate encoding and delimiter
-            with open(source_path, 'r', encoding='utf-8', newline='') as f:
-                reader = csv.DictReader(f, delimiter=delimiter) if self.has_header else csv.reader(f, delimiter=delimiter)
-                
-                # If no header, use column mapping or create default mapping
-                if not self.has_header:
-                    if not self.column_mapping:
-                        raise UnsupportedSourceError(
-                            f"CSV file {source} has no header and no column mapping provided",
-                            source=source,
-                            adapter=self.adapter_name
-                        )
-                    # For files without headers, we'll use positional mapping
-                    # This requires knowing the column order
-                    reader = csv.reader(f, delimiter=delimiter)
-                
-                # Process header row if present
-                column_mapping = self.column_mapping.copy() if self.column_mapping else {}
-                
-                if self.has_header and isinstance(reader, csv.DictReader):
-                    # Auto-detect column mapping from header if not provided
-                    if not column_mapping:
-                        column_mapping = self._auto_detect_column_mapping(reader.fieldnames or [])
-                    else:
-                        # Normalize column names (case-insensitive, strip whitespace)
-                        header_map = {col.strip().lower(): col for col in (reader.fieldnames or [])}
-                        # Update column_mapping to use actual header names
-                        normalized_mapping = {}
-                        for domain_field, csv_col in column_mapping.items():
-                            csv_col_lower = csv_col.lower().strip()
-                            if csv_col_lower in header_map:
-                                normalized_mapping[domain_field] = header_map[csv_col_lower]
-                            else:
-                                normalized_mapping[domain_field] = csv_col
-                        column_mapping = normalized_mapping
-                
-                # Process each record with triage
-                record_count = 0
-                rejected_count = 0
-                
-                for row in reader:
-                    record_count += 1
-                    
-                    # Triage: Wrap each record in try/except to prevent DoS
-                    try:
-                        # Convert row to dictionary
-                        if isinstance(row, dict):
-                            record_data = row
+            # Determine column mapping
+            column_mapping = self.column_mapping.copy() if self.column_mapping else {}
+            if self.has_header:
+                if not column_mapping:
+                    # Auto-detect from headers
+                    column_mapping = self._auto_detect_column_mapping(first_chunk.columns.tolist())
+                else:
+                    # Normalize column names (case-insensitive, strip whitespace)
+                    header_map = {col.strip().lower(): col for col in first_chunk.columns}
+                    normalized_mapping = {}
+                    for domain_field, csv_col in column_mapping.items():
+                        csv_col_lower = csv_col.lower().strip()
+                        if csv_col_lower in header_map:
+                            normalized_mapping[domain_field] = header_map[csv_col_lower]
                         else:
-                            # Row is a list (no header), map by position
-                            record_data = self._map_row_by_position(row, column_mapping)
-                        
-                        # Check record size to prevent memory exhaustion
-                        record_str = str(record_data)
-                        if len(record_str.encode('utf-8')) > self.max_record_size:
-                            error = TransformationError(
-                                f"Record {record_count} exceeds maximum size ({self.max_record_size} bytes)",
-                                source=source,
-                                raw_data={"size": len(record_str), "record_index": record_count}
-                            )
-                            rejected_count += 1
-                            self._log_security_rejection(
-                                source=source,
-                                record_index=record_count,
-                                error=error,
-                                raw_record={"record_index": record_count}
-                            )
-                            yield Result.failure_result(
-                                error,
-                                error_type="TransformationError",
-                                error_details={
-                                    "source": source,
-                                    "record_index": record_count,
-                                    "size": len(record_str),
-                                    "max_size": self.max_record_size
-                                }
-                            )
-                            continue
-                        
-                        # Transform and validate record
-                        golden_record = self._triage_and_transform(
-                            record_data,
-                            column_mapping,
-                            source,
-                            record_count
-                        )
-                        
-                        # Yield success result
-                        yield Result.success_result(golden_record)
-                        
-                    except (ValidationError, TransformationError) as e:
-                        # Security rejection: Log and return failure result
-                        rejected_count += 1
-                        self._log_security_rejection(
-                            source=source,
-                            record_index=record_count,
-                            error=e,
-                            raw_record=row if isinstance(row, dict) else {"record_index": record_count}
-                        )
-                        yield Result.failure_result(
-                            e,
-                            error_type=type(e).__name__,
-                            error_details={
-                                "source": source,
-                                "record_index": record_count,
-                                **(e.details if hasattr(e, 'details') and e.details else {}),
-                                **(e.raw_data if hasattr(e, 'raw_data') and e.raw_data else {})
-                            }
-                        )
-                        continue
-                        
-                    except Exception as e:
-                        # Unexpected error: Log as security concern and return failure result
-                        rejected_count += 1
-                        logger.error(
-                            f"Unexpected error processing record {record_count} from {source}: {str(e)}",
-                            exc_info=True,
-                            extra={
-                                'source': source,
-                                'record_index': record_count,
-                                'error_type': type(e).__name__,
-                            }
-                        )
-                        yield Result.failure_result(
-                            e,
-                            error_type=type(e).__name__,
-                            error_details={
-                                "source": source,
-                                "record_index": record_count
-                            }
-                        )
-                        continue
+                            normalized_mapping[domain_field] = csv_col
+                    column_mapping = normalized_mapping
+            else:
+                if not column_mapping:
+                    raise UnsupportedSourceError(
+                        f"CSV file {source} has no header and no column mapping provided",
+                        source=source,
+                        adapter=self.adapter_name
+                    )
+            
+            # Process CSV in chunks using pandas
+            chunk_count = 0
+            total_processed = 0
+            total_rejected = 0
+            
+            for chunk_df in pd.read_csv(
+                source_path,
+                chunksize=self.chunk_size,
+                delimiter=delimiter,
+                header=0 if self.has_header else None,
+                encoding='utf-8',
+                low_memory=False
+            ):
+                chunk_count += 1
                 
-                # Log ingestion summary
-                if record_count > 0:
-                    logger.info(
-                        f"CSV ingestion complete: {source} - "
-                        f"{record_count - rejected_count} accepted, {rejected_count} rejected"
+                try:
+                    # Map CSV columns to domain model fields
+                    mapped_df = self._map_dataframe_columns(chunk_df, column_mapping)
+                    
+                    # Apply vectorized PII redaction
+                    redacted_df = self._redact_dataframe(mapped_df)
+                    
+                    # Validate and filter valid records
+                    validated_df, failed_indices = self._validate_dataframe_chunk(
+                        redacted_df,
+                        source,
+                        chunk_count
                     )
                     
-        except csv.Error as e:
+                    # Track failures
+                    num_failed = len(failed_indices)
+                    num_valid = len(validated_df)
+                    total_processed += len(chunk_df)
+                    total_rejected += num_failed
+                    
+                    # Log failures if any
+                    if num_failed > 0:
+                        logger.warning(
+                            f"Chunk {chunk_count} from {source}: {num_failed} records failed validation, "
+                            f"{num_valid} records passed"
+                        )
+                    
+                    # Yield success result with validated DataFrame
+                    if len(validated_df) > 0:
+                        yield Result.success_result(validated_df)
+                    
+                    # Yield failure result if entire chunk failed
+                    if num_failed == len(chunk_df) and num_valid == 0:
+                        yield Result.failure_result(
+                            ValidationError(
+                                f"Chunk {chunk_count} from {source} failed validation: all {num_failed} records invalid",
+                                source=source,
+                                details={"chunk": chunk_count, "failed_count": num_failed}
+                            ),
+                            error_type="ValidationError",
+                            error_details={
+                                "source": source,
+                                "chunk": chunk_count,
+                                "failed_count": num_failed,
+                                "total_in_chunk": len(chunk_df)
+                            }
+                        )
+                        
+                except Exception as e:
+                    # Chunk-level error: Log and yield failure
+                    total_processed += len(chunk_df)
+                    total_rejected += len(chunk_df)
+                    logger.error(
+                        f"Error processing chunk {chunk_count} from {source}: {str(e)}",
+                        exc_info=True,
+                        extra={
+                            'source': source,
+                            'chunk': chunk_count,
+                            'error_type': type(e).__name__,
+                        }
+                    )
+                    yield Result.failure_result(
+                        e,
+                        error_type=type(e).__name__,
+                        error_details={
+                            "source": source,
+                            "chunk": chunk_count,
+                            "chunk_size": len(chunk_df)
+                        }
+                    )
+                    continue
+            
+            # Log ingestion summary
+            if total_processed > 0:
+                logger.info(
+                    f"CSV ingestion complete: {source} - "
+                    f"{total_processed - total_rejected} accepted, {total_rejected} rejected "
+                    f"({chunk_count} chunks processed)"
+                )
+                    
+        except pd.errors.EmptyDataError:
+            raise UnsupportedSourceError(
+                f"CSV file {source} is empty",
+                source=source,
+                adapter=self.adapter_name
+            )
+        except pd.errors.ParserError as e:
             raise UnsupportedSourceError(
                 f"Invalid CSV format in {source}: {str(e)}",
                 source=source,
@@ -402,6 +397,160 @@ class CSVIngester(IngestionPort):
                     break
         
         return mapping
+    
+    def _map_dataframe_columns(self, df: pd.DataFrame, column_mapping: Dict[str, str]) -> pd.DataFrame:
+        """Map CSV DataFrame columns to domain model field names.
+        
+        Parameters:
+            df: Raw CSV DataFrame
+            column_mapping: Mapping from domain fields to CSV column names
+        
+        Returns:
+            DataFrame with columns renamed to domain field names
+        """
+        # Create reverse mapping (CSV column -> domain field)
+        reverse_mapping = {csv_col: domain_field for domain_field, csv_col in column_mapping.items()}
+        
+        # Rename columns that are in the mapping
+        df_mapped = df.copy()
+        df_mapped = df_mapped.rename(columns=reverse_mapping)
+        
+        # Keep only columns that are in domain model (drop unmapped columns)
+        domain_columns = list(column_mapping.keys())
+        existing_columns = [col for col in domain_columns if col in df_mapped.columns]
+        df_mapped = df_mapped[existing_columns]
+        
+        return df_mapped
+    
+    def _redact_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Apply vectorized PII redaction to DataFrame columns.
+        
+        Note: Some fields (like postal_code) are not redacted here because
+        they need to pass pattern validation first. They will be redacted
+        by the Pydantic validators during model creation.
+        
+        Parameters:
+            df: DataFrame with domain model column names
+        
+        Returns:
+            DataFrame with PII fields redacted (where safe to do so)
+        """
+        df_redacted = df.copy()
+        
+        # Apply vectorized redaction to PII columns that don't have pattern constraints
+        if 'ssn' in df_redacted.columns:
+            df_redacted['ssn'] = RedactorService.redact_ssn(df_redacted['ssn'])
+        
+        if 'first_name' in df_redacted.columns:
+            df_redacted['first_name'] = RedactorService.redact_name(df_redacted['first_name'])
+        
+        if 'last_name' in df_redacted.columns:
+            df_redacted['last_name'] = RedactorService.redact_name(df_redacted['last_name'])
+        
+        if 'phone' in df_redacted.columns:
+            df_redacted['phone'] = RedactorService.redact_phone(df_redacted['phone'])
+        
+        if 'email' in df_redacted.columns:
+            df_redacted['email'] = RedactorService.redact_email(df_redacted['email'])
+        
+        if 'address_line1' in df_redacted.columns:
+            df_redacted['address_line1'] = RedactorService.redact_address(df_redacted['address_line1'])
+        
+        # Note: postal_code is NOT redacted here because it needs to pass pattern validation first
+        # It will be redacted by the Pydantic validator after validation
+        
+        # Date of birth is always redacted (set to None)
+        if 'date_of_birth' in df_redacted.columns:
+            df_redacted['date_of_birth'] = None
+        
+        return df_redacted
+    
+    def _validate_dataframe_chunk(
+        self,
+        df: pd.DataFrame,
+        source: str,
+        chunk_number: int
+    ) -> tuple[pd.DataFrame, List[int]]:
+        """Validate DataFrame chunk and return valid records + failed indices.
+        
+        Parameters:
+            df: DataFrame with redacted data
+            source: Source identifier
+            chunk_number: Chunk number for logging
+        
+        Returns:
+            Tuple of (validated DataFrame, list of failed row indices)
+        """
+        valid_records = []
+        failed_indices = []
+        
+        # Validate each row individually (required for Pydantic)
+        for idx, row in df.iterrows():
+            try:
+                # Convert row to dictionary
+                row_dict = row.to_dict()
+                
+                # Convert numeric fields to strings where needed (pandas may read ZIP codes as int)
+                if 'postal_code' in row_dict and pd.notna(row_dict.get('postal_code')):
+                    row_dict['postal_code'] = str(row_dict['postal_code'])
+                
+                # Check for required patient_id
+                if 'patient_id' not in row_dict or pd.isna(row_dict.get('patient_id')) or not row_dict.get('patient_id'):
+                    failed_indices.append(idx)
+                    continue
+                
+                # Create PatientRecord (validates and applies additional redaction via validators)
+                patient = PatientRecord(**{k: v for k, v in row_dict.items() if k in PatientRecord.model_fields})
+                
+                # Create minimal GoldenRecord (encounters/observations empty for CSV)
+                golden_record = GoldenRecord(
+                    patient=patient,
+                    encounters=[],
+                    observations=[],
+                    source_adapter=self.adapter_name,
+                    transformation_hash=self._generate_hash_from_row(row_dict)
+                )
+                
+                # Store validated record as dict for DataFrame reconstruction
+                # Include all fields from the validated patient record
+                patient_dict = patient.model_dump(exclude_none=False)
+                valid_records.append(patient_dict)
+                
+            except (PydanticValidationError, ValidationError, TransformationError) as e:
+                failed_indices.append(idx)
+                # Log individual failures (but don't spam logs)
+                if len(failed_indices) <= 10:  # Only log first 10 failures per chunk
+                    logger.warning(
+                        f"Record {idx} in chunk {chunk_number} from {source} failed validation: {str(e)}",
+                        extra={'source': source, 'chunk': chunk_number, 'row_index': idx}
+                    )
+            except Exception as e:
+                failed_indices.append(idx)
+                logger.error(
+                    f"Unexpected error validating record {idx} in chunk {chunk_number} from {source}: {str(e)}",
+                    exc_info=True,
+                    extra={'source': source, 'chunk': chunk_number, 'row_index': idx}
+                )
+        
+        # Create DataFrame from valid records
+        if valid_records:
+            validated_df = pd.DataFrame(valid_records)
+        else:
+            validated_df = pd.DataFrame()
+        
+        return validated_df, failed_indices
+    
+    def _generate_hash_from_row(self, row_dict: Dict[str, Any]) -> str:
+        """Generate hash from row dictionary for audit trail.
+        
+        Parameters:
+            row_dict: Row data as dictionary
+        
+        Returns:
+            str: SHA-256 hash
+        """
+        record_str = str(sorted(row_dict.items()))
+        return hashlib.sha256(record_str.encode('utf-8')).hexdigest()
     
     def _map_row_by_position(self, row: List[str], column_mapping: Dict[str, str]) -> Dict[str, Any]:
         """Map CSV row (list) to dictionary using positional mapping.

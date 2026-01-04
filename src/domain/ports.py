@@ -25,6 +25,8 @@ from src.domain.golden_record import GoldenRecord
 # Type variable for Result generic
 T = TypeVar('T')
 
+import pandas as pd
+
 
 # ============================================================================
 # Result Type for Success/Failure Communication
@@ -235,7 +237,7 @@ class IngestionPort(ABC):
     """
     
     @abstractmethod
-    def ingest(self, source: str) -> Iterator[Result[GoldenRecord]]:
+    def ingest(self, source: str) -> Iterator[Result[Union[GoldenRecord, 'pd.DataFrame']]]:
         """Ingest data from a source and yield Result objects containing GoldenRecord.
         
         This method is the primary entry point for data ingestion. Adapters must:
@@ -251,8 +253,8 @@ class IngestionPort(ABC):
                    The format is adapter-specific but typically a string path or URI.
         
         Yields:
-            Result[GoldenRecord]: Result object containing either:
-                - Success: Validated, PII-redacted golden record ready for persistence
+            Result[Union[GoldenRecord, pd.DataFrame]]: Result object containing either:
+                - Success: Validated, PII-redacted data (GoldenRecord for row-by-row, DataFrame for batch)
                 - Failure: Error information (error message, type, details)
         
         Raises:
@@ -261,19 +263,22 @@ class IngestionPort(ABC):
             IOError: If source cannot be read (permissions, network, etc.)
         
         Security Impact:
-            - Must redact all PII before yielding successful GoldenRecord
+            - Must redact all PII before yielding successful data
             - Must validate schema before yielding (fail-fast)
             - Should log transformation events for audit trail
             - Failures are communicated via Result, not exceptions (enables CircuitBreaker)
         
         Memory Impact:
-            - Uses Iterator pattern to stream records, preventing memory exhaustion
+            - Uses Iterator pattern to stream records/chunks, preventing memory exhaustion
             - Adapters should process records incrementally, not load entire dataset
+            - CSV/JSON ingesters use pandas chunked reading for vectorized processing
         
         Note:
             Individual record validation/transformation errors should be returned
             as Result.failure_result(), not raised as exceptions. This enables
             CircuitBreaker and other guardrails to monitor failure rates.
+            CSV/JSON ingesters yield Result[pd.DataFrame] for batch processing.
+            XML ingester yields Result[GoldenRecord] for row-by-row processing.
         """
         pass
     
@@ -362,7 +367,7 @@ class AsyncIngestionPort(ABC):
     """
     
     @abstractmethod
-    async def ingest(self, source: str) -> AsyncIterator[Result[GoldenRecord]]:
+    async def ingest(self, source: str) -> AsyncIterator[Result[Union[GoldenRecord, 'pd.DataFrame']]]:
         """Ingest data from a source asynchronously and yield validated GoldenRecord objects.
         
         This method is the primary entry point for async data ingestion. Adapters must:
@@ -378,8 +383,8 @@ class AsyncIngestionPort(ABC):
                    The format is adapter-specific but typically a string path or URI.
         
         Yields:
-            Result[GoldenRecord]: Result object containing either:
-                - Success: Validated, PII-redacted golden record ready for persistence
+            Result[Union[GoldenRecord, pd.DataFrame]]: Result object containing either:
+                - Success: Validated, PII-redacted data (GoldenRecord for row-by-row, DataFrame for batch)
                 - Failure: Error information (error message, type, details)
         
         Raises:
@@ -390,14 +395,15 @@ class AsyncIngestionPort(ABC):
             IOError: If source cannot be read (permissions, network, etc.)
         
         Security Impact:
-            - Must redact all PII before yielding GoldenRecord
+            - Must redact all PII before yielding successful data
             - Must validate schema before yielding (fail-fast)
             - Should log transformation events for audit trail
         
         Memory Impact:
-            - Uses AsyncIterator pattern to stream records, preventing memory exhaustion
+            - Uses AsyncIterator pattern to stream records/chunks, preventing memory exhaustion
             - Adapters should process records incrementally, not load entire dataset
             - Non-blocking I/O enables better resource utilization
+            - CSV/JSON ingesters use pandas chunked reading for vectorized processing
         """
         pass
     
