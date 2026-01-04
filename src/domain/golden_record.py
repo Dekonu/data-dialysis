@@ -24,6 +24,7 @@ from src.domain.enums import (
     EncounterClass,
     ObservationCategory,
 )
+from src.domain.services import RedactorService
 
 
 class PatientRecord(BaseModel):
@@ -98,18 +99,90 @@ class PatientRecord(BaseModel):
             return v
         return v.upper().strip()[:2] if len(v.strip()) >= 2 else v.upper().strip()
     
-    @field_validator("ssn")
+    @field_validator("ssn", mode="before")
     @classmethod
-    def validate_ssn_format(cls, v: Optional[str]) -> Optional[str]:
-        """Validate SSN format (will be redacted by Sieve, but validate structure)."""
+    def redact_ssn(cls, v: Optional[str]) -> Optional[str]:
+        """Redact SSN using RedactorService.
+        
+        Security Impact: SSN is redacted before being stored in the model.
+        """
+        return RedactorService.redact_ssn(v)
+    
+    @field_validator("first_name", mode="before")
+    @classmethod
+    def redact_first_name(cls, v: Optional[str]) -> Optional[str]:
+        """Redact first name using RedactorService.
+        
+        Security Impact: First name is redacted before being stored in the model.
+        """
+        return RedactorService.redact_name(v)
+    
+    @field_validator("last_name", mode="before")
+    @classmethod
+    def redact_last_name(cls, v: Optional[str]) -> Optional[str]:
+        """Redact last name using RedactorService.
+        
+        Security Impact: Last name is redacted before being stored in the model.
+        """
+        return RedactorService.redact_name(v)
+    
+    @field_validator("date_of_birth", mode="before")
+    @classmethod
+    def redact_date_of_birth(cls, v) -> Optional[date]:
+        """Redact date of birth using RedactorService.
+        
+        Security Impact: Date of birth is redacted (set to None) before being stored.
+        """
         if v is None:
-            return v
-        # Remove common separators
-        cleaned = v.replace("-", "").replace(" ", "")
-        if cleaned.isdigit() and len(cleaned) == 9:
-            return cleaned
-        # If format is invalid, return as-is (Sieve will handle redaction)
-        return v
+            return None
+        # Convert to date if needed, then redact (always returns None)
+        dob = v if isinstance(v, date) else None
+        return RedactorService.redact_date_of_birth(dob)
+    
+    @field_validator("phone", mode="before")
+    @classmethod
+    def redact_phone(cls, v: Optional[str]) -> Optional[str]:
+        """Redact phone number using RedactorService.
+        
+        Security Impact: Phone number is redacted before being stored in the model.
+        """
+        return RedactorService.redact_phone(v)
+    
+    @field_validator("email", mode="before")
+    @classmethod
+    def redact_email(cls, v: Optional[str]) -> Optional[str]:
+        """Redact email address using RedactorService.
+        
+        Security Impact: Email address is redacted before being stored in the model.
+        """
+        return RedactorService.redact_email(v)
+    
+    @field_validator("address_line1", mode="before")
+    @classmethod
+    def redact_address_line1(cls, v: Optional[str]) -> Optional[str]:
+        """Redact address line 1 using RedactorService.
+        
+        Security Impact: Address is redacted before being stored in the model.
+        """
+        return RedactorService.redact_address(v)
+    
+    @field_validator("address_line2", mode="before")
+    @classmethod
+    def redact_address_line2(cls, v: Optional[str]) -> Optional[str]:
+        """Redact address line 2 using RedactorService.
+        
+        Security Impact: Address is redacted before being stored in the model.
+        """
+        return RedactorService.redact_address(v)
+    
+    @field_validator("zip_code", mode="before")
+    @classmethod
+    def redact_zip_code(cls, v: Optional[str]) -> Optional[str]:
+        """Partially redact ZIP code using RedactorService.
+        
+        Security Impact: ZIP code is partially redacted (first 2 digits kept) for analytics.
+        """
+        return RedactorService.redact_zip_code(v)
     
     model_config = ConfigDict(
         frozen=True,  # Immutable records
@@ -146,6 +219,16 @@ class ClinicalObservation(BaseModel):
     unit: Optional[str] = Field(None, description="Unit of measurement")
     effective_date: Optional[datetime] = Field(None, description="When observation was taken")
     notes: Optional[str] = Field(None, description="Clinical notes (may contain PII)")
+    
+    @field_validator("notes", mode="before")
+    @classmethod
+    def redact_notes(cls, v: Optional[str]) -> Optional[str]:
+        """Redact PII from clinical notes using RedactorService.
+        
+        Security Impact: Unstructured notes are scanned and PII is redacted
+        before being stored in the model.
+        """
+        return RedactorService.redact_observation_notes(v)
     
     @field_validator("observation_type", mode="before")
     @classmethod

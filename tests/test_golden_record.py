@@ -25,7 +25,7 @@ class TestPatientRecord:
     """Test suite for PatientRecord model."""
     
     def test_valid_patient_record(self):
-        """Test creating a valid patient record."""
+        """Test creating a valid patient record with automatic PII redaction."""
         patient = PatientRecord(
             patient_id="P001",
             first_name="John",
@@ -36,8 +36,13 @@ class TestPatientRecord:
             state="CA",
         )
         assert patient.patient_id == "P001"
-        assert patient.first_name == "John"
+        # PII fields should be automatically redacted
+        assert patient.first_name == "[REDACTED]"
+        assert patient.last_name == "[REDACTED]"
+        assert patient.date_of_birth is None  # DOB is fully redacted
+        assert patient.ssn == "***-**-****"
         assert patient.gender == AdministrativeGender.MALE
+        assert patient.state == "CA"  # Non-PII field unchanged
     
     def test_gender_normalization(self):
         """Test that gender values are normalized to FHIR AdministrativeGender."""
@@ -65,15 +70,49 @@ class TestPatientRecord:
         patient_long = PatientRecord(patient_id="P002", state="california")
         assert patient_long.state == "CA"
     
-    def test_ssn_validation(self):
-        """Test SSN format validation."""
-        # Valid SSN with dashes
+    def test_ssn_redaction(self):
+        """Test that SSN is automatically redacted regardless of format."""
+        # Valid SSN with dashes - should be redacted
         patient = PatientRecord(patient_id="P001", ssn="123-45-6789")
-        assert patient.ssn == "123456789"
+        assert patient.ssn == "***-**-****"
         
-        # Valid SSN without dashes
+        # Valid SSN without dashes - should be redacted
         patient2 = PatientRecord(patient_id="P002", ssn="987654321")
-        assert patient2.ssn == "987654321"
+        assert patient2.ssn == "***-**-****"
+        
+        # Invalid SSN format - should still be redacted if pattern matches
+        patient3 = PatientRecord(patient_id="P003", ssn="123-45-678")
+        # If pattern doesn't match exactly, may return original or redacted
+        # The service will redact if it detects SSN pattern
+    
+    def test_pii_redaction(self):
+        """Test that all PII fields are automatically redacted."""
+        patient = PatientRecord(
+            patient_id="P001",
+            first_name="John",
+            last_name="Doe",
+            date_of_birth=date(1980, 1, 15),
+            ssn="123-45-6789",
+            phone="555-123-4567",
+            email="john.doe@example.com",
+            address_line1="123 Main St",
+            address_line2="Apt 4B",
+            zip_code="12345",
+        )
+        
+        # All PII should be redacted
+        assert patient.first_name == "[REDACTED]"
+        assert patient.last_name == "[REDACTED]"
+        assert patient.date_of_birth is None
+        assert patient.ssn == "***-**-****"
+        assert patient.phone == "***-***-****"
+        assert patient.email == "***@***.***"
+        assert patient.address_line1 == "[REDACTED]"
+        assert patient.address_line2 == "[REDACTED]"
+        assert patient.zip_code == "12***"  # Partially redacted
+        
+        # Non-PII fields should remain unchanged
+        assert patient.patient_id == "P001"
     
     def test_immutable_record(self):
         """Test that records are immutable."""
