@@ -1,0 +1,5 @@
+MRN,FirstName,LastName,DOB,Gender,SSN,Phone,Email,Address,City,State,ZIP
+MRN001,John,Doe,1990-01-01,male,123-45-6789,555-123-4567,john.doe@example.com,123 Main St,Springfield,IL,62701
+AB,Jane,Smith,1995-05-15,female,987-65-4321,555-987-6543,jane@example.com,456 Oak Ave,Los Angeles,CA,90210
+MRN003,Bob,Johnson,1985-03-20,male,,,,789 Pine Rd,Chicago,IL,60601
+MRN004,Alice,Williams,2030-01-01,female,,,,321 Elm St,Miami,FL,33101
