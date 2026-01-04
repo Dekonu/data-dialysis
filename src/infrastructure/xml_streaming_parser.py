@@ -17,8 +17,9 @@ Architecture:
 """
 
 import logging
+import gc
 from pathlib import Path
-from typing import Iterator, Optional, Tuple, Any
+from typing import Iterator, Optional, Any
 from contextlib import contextmanager
 
 try:
@@ -152,10 +153,22 @@ class StreamingXMLParser:
         """
         # Check event limit
         self.event_count += 1
+        
+        # Log warning when approaching limit (at 80% and 90%)
+        if self.event_count == int(self.max_events * 0.8):
+            logger.warning(
+                f"XML event count at 80% of limit: {self.event_count:,} / {self.max_events:,}"
+            )
+        elif self.event_count == int(self.max_events * 0.9):
+            logger.warning(
+                f"XML event count at 90% of limit: {self.event_count:,} / {self.max_events:,}"
+            )
+        
         if self.event_count > self.max_events:
             raise SecurityError(
-                f"XML event limit exceeded: {self.event_count} > {self.max_events}. "
-                "This may indicate a malicious XML file."
+                f"XML event limit exceeded: {self.event_count:,} > {self.max_events:,}. "
+                f"This may indicate a very large file or a malicious XML file. "
+                f"Consider increasing max_events for large files."
             )
         
         # Check depth limit
@@ -233,19 +246,24 @@ class StreamingXMLParser:
         # Open file for streaming
         try:
             with open(source_path, 'rb') as xml_file:
-                # Use iterparse for streaming
-                # Note: iterparse doesn't accept parser as keyword argument
-                # Security is enforced via manual checks in _check_security_limits
-                # The parser settings (resolve_entities=False, etc.) are handled
-                # by our security checks rather than the parser itself
+                # Use iterparse for streaming with security options
+                # Note: iterparse doesn't accept a parser object, so we pass options directly
                 context = iterparse(
                     xml_file,
                     events=('end',),
-                    tag=record_tag if record_tag else None
+                    tag=record_tag if record_tag else None,
+                    huge_tree=self.huge_tree,
+                    resolve_entities=False,  # Security: prevent entity expansion
+                    no_network=True,  # Security: prevent network access
+                    recover=False,  # Security: fail on malformed XML
+                    remove_blank_text=True  # Performance: remove whitespace
                 )
                 
                 def record_iterator() -> Iterator[Any]:
                     """Inner iterator that yields records and enforces security."""
+                    root_element = None
+                    record_counter = 0
+                    
                     for event, elem in context:
                         try:
                             # Check security limits
@@ -256,22 +274,43 @@ class StreamingXMLParser:
                                 # Check if element matches XPath
                                 matches = elem.xpath(record_xpath)
                                 if not matches:
-                                    # Clear and skip
+                                    # Clear and skip - remove from parent to free memory
                                     elem.clear()
                                     parent = elem.getparent()
                                     if parent is not None:
                                         parent.remove(elem)
                                     continue
                             
-                            # Yield record element (caller must process before next iteration)
+                            # Get root element reference on first iteration
+                            if root_element is None:
+                                try:
+                                    root_element = elem.getroottree().getroot()
+                                except Exception:
+                                    root_element = None
+                            
+                            # Yield record element
                             yield elem
                             
-                            # After yielding, clear element (memory management)
-                            # Note: Element is still valid during yield, cleared after
-                            elem.clear()
+                            # After yielding, clear element to free memory
+                            # Critical for large files: clear element and remove from parent tree
+                            elem.clear(keep_tail=False)
                             parent = elem.getparent()
                             if parent is not None:
                                 parent.remove(elem)
+                            
+                            # Root cleanup: Keep only last few elements to prevent memory growth
+                            if root_element is not None:
+                                try:
+                                    # Keep only last 2 elements (aggressive cleanup)
+                                    while len(root_element) > 2:
+                                        root_element.remove(root_element[0])
+                                except Exception:
+                                    pass  # Ignore cleanup errors
+                            
+                            # Periodic garbage collection for very large files
+                            record_counter += 1
+                            if record_counter % 500 == 0:
+                                gc.collect()
                             
                         except SecurityError:
                             # Re-raise security errors
@@ -283,10 +322,13 @@ class StreamingXMLParser:
                                 exc_info=True
                             )
                             # Clear element on error
-                            elem.clear()
-                            parent = elem.getparent()
-                            if parent is not None:
-                                parent.remove(elem)
+                            try:
+                                elem.clear(keep_tail=False)
+                                parent = elem.getparent()
+                                if parent is not None:
+                                    parent.remove(elem)
+                            except Exception:
+                                pass
                             continue
                 
                 yield record_iterator()
@@ -315,7 +357,6 @@ class StreamingXMLParser:
         """
         try:
             # Evaluate XPath (relative to element)
-            # lxml supports xpath() method directly
             results = elem.xpath(xpath_expr)
             
             if not results:
@@ -353,4 +394,3 @@ class StreamingXMLParser:
         except Exception as e:
             logger.debug(f"XPath extraction failed for '{xpath_expr}': {str(e)}")
             return None
-

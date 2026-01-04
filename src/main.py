@@ -211,13 +211,14 @@ def process_ingestion(
                     logger.error(f"Failed to persist final batch: {persist_result.error}")
         
         except KeyboardInterrupt:
-        logger.warning("Ingestion interrupted by user")
-        # Try to persist any remaining records
-        if batch_records:
-            logger.info(f"Attempting to persist {len(batch_records)} remaining records...")
-            persist_result = storage.persist_batch(batch_records)
-            if persist_result.is_success():
-                success_count += len(batch_records)
+            logger.warning("Ingestion interrupted by user")
+
+            # Try to persist any remaining records
+            if batch_records:
+                logger.info(f"Attempting to persist {len(batch_records)} remaining records...")
+                persist_result = storage.persist_batch(batch_records)
+                if persist_result.is_success():
+                    success_count += len(batch_records)
     
     # Flush redaction logs to storage
     logger.info("Flushing redaction logs to storage...")

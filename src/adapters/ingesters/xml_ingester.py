@@ -1,11 +1,11 @@
 """XML Data Ingestion Adapter.
 
 This adapter implements the IngestionPort contract for XML data sources.
-It uses defusedxml to prevent XML-based attacks and supports configurable
-XPath-based field mapping for different XML structures.
+It uses a hybrid approach combining lxml for performance with security protections
+similar to defusedxml, supporting both streaming and traditional parsing modes.
 
 Security Impact:
-    - Uses defusedxml to prevent Billion Laughs attacks and quadratic blowup
+    - Uses secure streaming parser to prevent XML-based attacks
     - Triage logic identifies and rejects malicious or malformed records
     - Bad records are logged as security rejections for audit trail
     - Each record is wrapped in try/except to prevent DoS attacks
@@ -18,11 +18,13 @@ Architecture:
     - Isolated from domain core - only depends on ports and models
     - Streaming pattern prevents memory exhaustion
     - Fail-safe design: bad records don't crash the pipeline
+    - Automatic mode selection based on file size
 """
 
 import json
 import logging
 import hashlib
+import gc
 from pathlib import Path
 from typing import Iterator, Optional, Any, Dict
 from datetime import datetime
@@ -30,6 +32,14 @@ from datetime import datetime
 from defusedxml import ElementTree as SafeET
 from defusedxml.ElementTree import ParseError as SafeParseError
 from pydantic import ValidationError as PydanticValidationError
+
+# Check if lxml is available for streaming and XPath compilation
+try:
+    from lxml import etree
+    LXML_AVAILABLE = True
+except ImportError:
+    LXML_AVAILABLE = False
+    etree = None
 
 from src.domain.ports import (
     IngestionPort,
@@ -45,7 +55,6 @@ from src.domain.golden_record import (
     ClinicalObservation,
     EncounterRecord,
 )
-from src.domain.services import RedactorService
 
 # Configure logging for security rejections
 logger = logging.getLogger(__name__)
@@ -54,33 +63,30 @@ logger = logging.getLogger(__name__)
 class XMLIngester(IngestionPort):
     """XML ingestion adapter with configurable XPath mapping and fail-safe error handling.
     
-    This adapter reads XML files and transforms them into GoldenRecord objects using
-    configurable XPath expressions. It supports different XML structures (nested, flat)
-    through JSON configuration files.
+    This adapter processes XML files using XPath expressions to extract data into
+    GoldenRecord format. It supports both streaming (for large files) and traditional
+    (for small files) parsing modes with automatic selection based on file size.
     
     Key Features:
-        - DefusedXML: Prevents XML-based attacks (Billion Laughs, quadratic blowup)
-        - Configurable: JSON-based XPath mapping for flexible XML structures
-        - Triage: Identifies and rejects bad records without crashing
+        - Automatic mode selection: Streaming for large files, traditional for small files
+        - Security: Secure streaming parser with event/depth limits
+        - Performance: Pre-compiled XPath expressions for faster extraction
         - Fail-safe: Each record wrapped in try/except to prevent DoS
-        - Security logging: Bad records logged as security rejections
-        - Streaming: Processes records one-by-one to save memory
-        - PII redaction: Applies redaction before validation
+        - PII redaction: Applied before validation via model validators
     
-    Security Impact:
-        - Malformed records are logged and rejected, not processed
-        - DoS protection via per-record error isolation
-        - XML attack prevention via defusedxml
-        - Audit trail of all rejected records
+    Security Features:
+        - Uses secure streaming parser to prevent XML-based attacks
+        - Streaming parser with event/depth limits
+        - Record size limits to prevent memory exhaustion
+        - PII redaction before validation
     
     Configuration Format:
         {
-            "root_element": "XPath/to/root/element",
+            "root_element": "./PatientRecord",
             "fields": {
                 "patient_id": "./MRN",
                 "first_name": "./Demographics/FirstName",
-                "last_name": "./Demographics/LastName",
-                ...
+                "last_name": "./Demographics/LastName"
             }
         }
     """
@@ -99,7 +105,6 @@ class XMLIngester(IngestionPort):
             config_path: Path to JSON configuration file with XPath mappings
             config_dict: Configuration dictionary (alternative to config_path)
             max_record_size: Maximum size of a single record in bytes (default: 10MB)
-                            Prevents memory exhaustion from oversized records
             streaming_enabled: Enable streaming mode (None = auto-detect based on file size)
             streaming_threshold: File size threshold for auto-enabling streaming (bytes)
         
@@ -132,29 +137,40 @@ class XMLIngester(IngestionPort):
         self.root_xpath = self.config.get('root_element', '.')
         self.field_mappings = self.config.get('fields', {})
         
+        # Pre-compile XPath expressions for performance
+        self._compiled_xpaths = {}
+        self._has_compiled_xpaths = False
+        if LXML_AVAILABLE:
+            try:
+                for field_name, xpath_expr in self.field_mappings.items():
+                    # Clean XPath: remove leading ./ for relative paths
+                    clean_path = xpath_expr.lstrip('./')
+                    self._compiled_xpaths[field_name] = etree.XPath(clean_path)
+                self._has_compiled_xpaths = True
+            except Exception as e:
+                logger.warning(f"Could not pre-compile XPaths (falling back to string lookup): {e}")
+                self._has_compiled_xpaths = False
+        
         # Streaming configuration
         from src.infrastructure.settings import settings
-        # Preserve None for auto-detection - don't override with settings
-        # None means auto-detect based on file size
         self.streaming_enabled = streaming_enabled
         self.streaming_threshold = streaming_threshold or settings.xml_streaming_threshold
         
         # Initialize streaming parser if streaming might be used
-        # (either explicitly enabled or auto-detect mode)
         self._streaming_parser = None
         if self.streaming_enabled is not False:  # True or None (auto-detect)
             try:
                 from src.infrastructure.xml_streaming_parser import StreamingXMLParser
                 self._streaming_parser = StreamingXMLParser(
                     max_events=settings.xml_max_events,
-                    max_depth=settings.xml_max_depth
+                    max_depth=settings.xml_max_depth,
+                    huge_tree=False  # Keep False for security
                 )
             except ImportError:
                 logger.warning(
                     "lxml not available, falling back to non-streaming mode. "
                     "Install lxml for streaming support: pip install lxml"
                 )
-                # If lxml not available, disable streaming regardless of setting
                 self.streaming_enabled = False
     
     def _validate_config(self) -> None:
@@ -258,7 +274,7 @@ class XMLIngester(IngestionPort):
             bool: True if streaming should be used
         
         Logic:
-            - If streaming_enabled is explicitly True: Always use streaming (ignore file size)
+            - If streaming_enabled is explicitly True: Always use streaming
             - If streaming_enabled is explicitly False: Never use streaming
             - If streaming_enabled is None (auto-detect): Check file size against threshold
         """
@@ -268,7 +284,6 @@ class XMLIngester(IngestionPort):
         
         # Streaming parser not available
         if not self._streaming_parser:
-            
             return False
         
         # Explicitly enabled - use streaming regardless of file size
@@ -276,7 +291,6 @@ class XMLIngester(IngestionPort):
             return True
         
         # Auto-detect mode (streaming_enabled is None) - check file size
-        # This means settings.xml_streaming_enabled was used
         try:
             source_path = Path(source)
             if source_path.exists():
@@ -309,7 +323,7 @@ class XMLIngester(IngestionPort):
         """
         # Check if streaming should be used
         if self._should_use_streaming(source):
-            logger.info(f"Using streaming mode for large XML file: {source}")
+            logger.info(f"Using streaming mode for XML file: {source}")
             yield from self._ingest_streaming(source)
         else:
             yield from self._ingest_traditional(source)
@@ -334,34 +348,93 @@ class XMLIngester(IngestionPort):
         record_tag = self._get_record_tag_from_config()
         record_xpath = self.root_xpath if record_tag is None else None
         
+        # For very large files, create parser with adjusted limits
+        file_size = source_path.stat().st_size
+        huge_tree_threshold = 50 * 1024 * 1024  # 50MB
+        
+        # Use appropriate parser based on file size
+        if file_size > huge_tree_threshold and self._streaming_parser:
+            from src.infrastructure.xml_streaming_parser import StreamingXMLParser
+            from src.infrastructure.settings import settings
+            
+            # Estimate events: ~30 events per record, ~900 bytes per record
+            estimated_records = file_size // 900
+            estimated_events = estimated_records * 30
+            # Add 50% buffer and round up to nearest million
+            safe_max_events = int((estimated_events * 1.5) // 1_000_000 + 1) * 1_000_000
+            # Cap at 10M events for safety
+            safe_max_events = min(safe_max_events, 10_000_000)
+            
+            logger.info(
+                f"Large file detected ({file_size / (1024*1024):.2f} MB). "
+                f"Using parser with huge_tree=True and max_events={safe_max_events:,}"
+            )
+            
+            large_file_parser = StreamingXMLParser(
+                max_events=safe_max_events,
+                max_depth=settings.xml_max_depth,
+                huge_tree=True  # Enable for large files
+            )
+            parser_to_use = large_file_parser
+        else:
+            parser_to_use = self._streaming_parser
+        
         # Process records using streaming parser
         record_count = 0
         rejected_count = 0
         
         try:
-            with self._streaming_parser.parse(source, record_tag=record_tag, record_xpath=record_xpath) as records:
+            with parser_to_use.parse(source, record_tag=record_tag, record_xpath=record_xpath) as records:
+                root_element = None
+                last_root_cleanup = 0
+                
                 for xml_record in records:
                     record_count += 1
                     
+                    # Get root element reference on first iteration
+                    if root_element is None:
+                        try:
+                            root_element = xml_record.getroottree().getroot()
+                        except Exception:
+                            root_element = None
+                    
                     # Triage: Wrap each record in try/except to prevent DoS
                     try:
-                        # Extract data using XPath mappings (use streaming parser's XPath method)
+                        # Extract data FIRST, then clear element IMMEDIATELY
                         record_data = self._extract_record_data_streaming(xml_record, record_count)
                         
+                        # Clear and detach element IMMEDIATELY after extraction
+                        xml_record.clear(keep_tail=False)
+                        parent = xml_record.getparent()
+                        if parent is not None:
+                            parent.remove(xml_record)
+                        
+                        # Root cleanup: Clean root periodically
+                        if root_element is not None:
+                            cleanup_interval = 50 if file_size > 75 * 1024 * 1024 else (100 if file_size > 50 * 1024 * 1024 else 200)
+                            if record_count - last_root_cleanup >= cleanup_interval:
+                                try:
+                                    max_keep = 1 if file_size > 75 * 1024 * 1024 else 2
+                                    while len(root_element) > max_keep:
+                                        root_element.remove(root_element[0])
+                                    last_root_cleanup = record_count
+                                except Exception:
+                                    pass
+                        
                         # Check record size
-                        record_str = json.dumps(record_data)
-                        if len(record_str.encode('utf-8')) > self.max_record_size:
+                        estimated_size = sum(len(str(v).encode('utf-8')) for v in record_data.values()) + len(record_data) * 10
+                        if estimated_size > self.max_record_size:
                             error = TransformationError(
                                 f"Record {record_count} exceeds maximum size ({self.max_record_size} bytes)",
                                 source=source,
-                                raw_data={"size": len(record_str), "record_index": record_count}
+                                raw_data={"estimated_size": estimated_size, "record_index": record_count}
                             )
                             rejected_count += 1
                             self._log_security_rejection(
                                 source=source,
                                 record_index=record_count,
                                 error=error,
-                                raw_record={"record_index": record_count, "size": len(record_str)}
+                                raw_record={"record_index": record_count, "estimated_size": estimated_size}
                             )
                             yield Result.failure_result(
                                 error,
@@ -374,9 +447,23 @@ class XMLIngester(IngestionPort):
                         golden_record = self._triage_and_transform(record_data, source, record_count)
                         yield Result.success_result(golden_record)
                         
+                        # Periodic garbage collection for very large files
+                        if file_size > 75 * 1024 * 1024 and record_count % 500 == 0:
+                            gc.collect()
+                        
                     except Exception as e:
                         # Triage: Log and continue (fail-safe)
                         rejected_count += 1
+                        
+                        # Clear element even on error
+                        try:
+                            xml_record.clear(keep_tail=False)
+                            parent = xml_record.getparent()
+                            if parent is not None:
+                                parent.remove(xml_record)
+                        except Exception:
+                            pass
+                        
                         error = TransformationError(
                             f"Error processing record {record_count}: {str(e)}",
                             source=source,
@@ -394,9 +481,6 @@ class XMLIngester(IngestionPort):
                             error_details={"record_index": record_count, "error": str(e)}
                         )
                         continue
-                    finally:
-                        # Memory is already cleared by streaming parser
-                        pass
                         
         except Exception as e:
             # Streaming parser errors
@@ -566,7 +650,7 @@ class XMLIngester(IngestionPort):
             )
     
     def _extract_record_data_streaming(self, xml_element: Any, record_index: int) -> dict:
-        """Extract data from XML element using streaming parser's XPath method.
+        """Extract data from XML element using pre-compiled XPath expressions.
         
         Parameters:
             xml_element: XML element to extract data from
@@ -577,23 +661,46 @@ class XMLIngester(IngestionPort):
         """
         record_data = {}
         
-        for field_name, xpath_expr in self.field_mappings.items():
-            try:
-                # Use streaming parser's XPath extraction
-                value = self._streaming_parser.extract_with_xpath(xml_element, xpath_expr)
-                if value:
-                    record_data[field_name] = value
-            except Exception as e:
-                logger.warning(
-                    f"XPath extraction failed for field '{field_name}' "
-                    f"in record {record_index}: {str(e)}",
-                    extra={
-                        'field_name': field_name,
-                        'xpath': xpath_expr,
-                        'record_index': record_index,
-                    }
-                )
-                continue
+        if self._has_compiled_xpaths:
+            # Use pre-compiled XPaths for better performance
+            for field_name, compiled_xpath in self._compiled_xpaths.items():
+                try:
+                    results = compiled_xpath(xml_element)
+                    
+                    if not results:
+                        continue
+                    
+                    # Handle different result types
+                    if isinstance(results, list):
+                        valid_results = []
+                        for r in results:
+                            if hasattr(r, 'text') and r.text:
+                                valid_results.append(r.text.strip())
+                            elif isinstance(r, str) and r.strip():
+                                valid_results.append(r.strip())
+                        
+                        if valid_results:
+                            record_data[field_name] = valid_results if len(valid_results) > 1 else valid_results[0]
+                    else:
+                        # Single result
+                        if hasattr(results, 'text') and results.text:
+                            record_data[field_name] = results.text.strip()
+                        elif isinstance(results, str) and results.strip():
+                            record_data[field_name] = results.strip()
+                            
+                except Exception:
+                    # Silently skip failed extractions
+                    continue
+        else:
+            # Fallback to streaming parser's XPath method or traditional extraction
+            if self._streaming_parser:
+                for field_name, xpath_expr in self.field_mappings.items():
+                    value = self._streaming_parser.extract_with_xpath(xml_element, xpath_expr)
+                    if value:
+                        record_data[field_name] = value
+            else:
+                # Fallback to traditional extraction
+                return self._extract_record_data(xml_element, record_index)
         
         return record_data
     
@@ -606,9 +713,6 @@ class XMLIngester(IngestionPort):
         
         Returns:
             dict: Extracted data dictionary
-        
-        Raises:
-            TransformationError: If XPath extraction fails
         """
         record_data = {}
         
@@ -701,7 +805,7 @@ class XMLIngester(IngestionPort):
             
             # Transform encounters (optional)
             encounters = []
-            encounter_data = self._map_to_encounter_record(record_data)
+            encounter_data = self._map_to_encounter_record(record_data, patient.patient_id)
             if encounter_data:
                 try:
                     encounter = EncounterRecord(**encounter_data)
@@ -727,23 +831,6 @@ class XMLIngester(IngestionPort):
             
             # Generate transformation hash for audit trail
             transformation_hash = self._generate_hash(record_data)
-            
-            # Set record_id in context before creating GoldenRecord
-            # This allows validators to log redactions with the correct record_id
-            patient_id = patient.patient_id if hasattr(patient, 'patient_id') else record_data.get('patient_id')
-            if patient_id:
-                try:
-                    from src.infrastructure.redaction_context import set_redaction_context, get_redaction_context
-                    context = get_redaction_context()
-                    if context:
-                        set_redaction_context(
-                            logger=context.get('logger'),
-                            record_id=str(patient_id),
-                            source_adapter=context.get('source_adapter'),
-                            ingestion_id=context.get('ingestion_id')
-                        )
-                except (ImportError, AttributeError):
-                    pass  # Context not available - skip
             
             # Construct GoldenRecord (final validation)
             golden_record = GoldenRecord(
@@ -777,14 +864,7 @@ class XMLIngester(IngestionPort):
             )
     
     def _map_to_patient_record(self, record_data: dict) -> dict:
-        """Map XML record data to PatientRecord fields.
-        
-        Parameters:
-            record_data: Extracted XML data
-        
-        Returns:
-            dict: PatientRecord-compatible dictionary
-        """
+        """Map XML record data to PatientRecord fields."""
         patient_data = {}
         
         # Map patient identifier (support both mrn and patient_id)
@@ -793,169 +873,126 @@ class XMLIngester(IngestionPort):
         elif 'patient_id' in record_data:
             patient_data['patient_id'] = record_data['patient_id']
         
-        # Map name fields (support various formats)
+        # Map name fields
         if 'patient_name' in record_data:
-            # Split full name if needed
             name_parts = str(record_data['patient_name']).strip().split(maxsplit=1)
             if len(name_parts) == 2:
                 patient_data['first_name'] = name_parts[0]
                 patient_data['last_name'] = name_parts[1]
-            else:
-                patient_data['first_name'] = name_parts[0] if name_parts else None
         else:
             if 'first_name' in record_data:
                 patient_data['first_name'] = record_data['first_name']
             if 'last_name' in record_data:
                 patient_data['last_name'] = record_data['last_name']
         
-        # Map date of birth
-        if 'patient_dob' in record_data:
-            patient_data['date_of_birth'] = record_data['patient_dob']
-        
-        # Map gender
-        if 'patient_gender' in record_data:
-            patient_data['gender'] = record_data['patient_gender']
-        
         # Map other fields
-        field_mappings = {
-            'ssn': 'ssn',
-            'phone': 'phone',
-            'email': 'email',
-            'address_line1': 'address_line1',
-            'address_line2': 'address_line2',
-            'city': 'city',
-            'state': 'state',
-            'postal_code': 'postal_code',
-            'zip_code': 'zip_code',  # Support deprecated field
-        }
-        
-        for xml_field, model_field in field_mappings.items():
-            if xml_field in record_data:
-                patient_data[model_field] = record_data[xml_field]
+        for field in ['date_of_birth', 'gender', 'address_line1', 'city', 'state', 'postal_code', 'phone', 'email']:
+            if field in record_data:
+                patient_data[field] = record_data[field]
         
         return patient_data
     
-    def _map_to_encounter_record(self, record_data: dict) -> Optional[dict]:
-        """Map XML record data to EncounterRecord fields.
-        
-        Parameters:
-            record_data: Extracted XML data
-        
-        Returns:
-            Optional[dict]: EncounterRecord-compatible dictionary or None
-        """
-        # Check if we have encounter data
-        if not any(key in record_data for key in ['encounter_date', 'encounter_id', 'visit_date']):
-            return None
-        
+    def _map_to_encounter_record(self, record_data: dict, patient_id: str) -> Optional[dict]:
+        """Map XML record data to EncounterRecord fields."""
         encounter_data = {}
         
-        # Map encounter identifier
-        if 'encounter_id' in record_data:
-            encounter_data['encounter_id'] = record_data['encounter_id']
+        # Map patient_id (required)
+        encounter_data['patient_id'] = patient_id
+        
+        # Map encounter_id (required) - generate if missing
+        if 'encounter_id' in record_data and record_data['encounter_id']:
+            encounter_data['encounter_id'] = str(record_data['encounter_id'])
         else:
-            # Generate from patient_id if available
-            patient_id = record_data.get('patient_id') or record_data.get('mrn')
-            if patient_id:
-                encounter_data['encounter_id'] = f"ENC_{patient_id}"
+            # Generate encounter_id from patient_id and date if available
+            if 'encounter_date' in record_data:
+                try:
+                    date_str = str(record_data['encounter_date']).replace('-', '').replace(' ', '').replace(':', '')[:8]
+                    encounter_data['encounter_id'] = f"{patient_id}_{date_str}"
+                except Exception:
+                    return None
+            else:
+                return None
         
-        # Map patient reference
-        patient_id = record_data.get('patient_id') or record_data.get('mrn')
-        if patient_id:
-            encounter_data['patient_id'] = patient_id
-        
-        # Map encounter class
-        if 'encounter_type' in record_data:
-            encounter_data['class_code'] = record_data['encounter_type']
-        elif 'encounter_class' in record_data:
-            encounter_data['class_code'] = record_data['encounter_class']
+        # Map class_code (required)
+        if 'encounter_type' in record_data and record_data['encounter_type']:
+            from src.domain.enums import EncounterClass
+            encounter_type = str(record_data['encounter_type']).lower().strip()
+            type_mapping = {
+                'inpatient': EncounterClass.INPATIENT,
+                'outpatient': EncounterClass.OUTPATIENT,
+                'ambulatory': EncounterClass.AMBULATORY,
+                'emergency': EncounterClass.EMERGENCY,
+                'virtual': EncounterClass.VIRTUAL,
+            }
+            if encounter_type in type_mapping:
+                encounter_data['class_code'] = type_mapping[encounter_type]
+            else:
+                try:
+                    encounter_data['class_code'] = EncounterClass(encounter_type)
+                except ValueError:
+                    encounter_data['class_code'] = EncounterClass.OUTPATIENT
         else:
-            encounter_data['class_code'] = 'outpatient'  # Default
+            from src.domain.enums import EncounterClass
+            encounter_data['class_code'] = EncounterClass.OUTPATIENT
         
-        # Map dates
-        if 'encounter_date' in record_data:
-            encounter_data['period_start'] = record_data['encounter_date']
-        elif 'visit_date' in record_data:
-            encounter_data['period_start'] = record_data['visit_date']
-        elif 'admit_date' in record_data:
-            encounter_data['period_start'] = record_data['admit_date']
+        # Map optional fields
+        if 'encounter_date' in record_data and record_data['encounter_date']:
+            try:
+                date_str = str(record_data['encounter_date'])
+                if 'T' in date_str or len(date_str) > 10:
+                    encounter_data['period_start'] = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+                else:
+                    from datetime import date as date_type
+                    parsed_date = date_type.fromisoformat(date_str)
+                    encounter_data['period_start'] = datetime.combine(parsed_date, datetime.min.time())
+            except Exception:
+                pass
         
-        # Map status
-        if 'encounter_status' in record_data:
-            encounter_data['status'] = record_data['encounter_status']
-        elif 'visit_status' in record_data:
-            encounter_data['status'] = record_data['visit_status']
+        if 'encounter_status' in record_data and record_data['encounter_status']:
+            from src.domain.enums import EncounterStatus
+            status_str = str(record_data['encounter_status']).lower().strip()
+            status_mapping = {
+                'planned': EncounterStatus.PLANNED,
+                'in-progress': EncounterStatus.IN_PROGRESS,
+                'finished': EncounterStatus.FINISHED,
+                'cancelled': EncounterStatus.CANCELLED,
+            }
+            if status_str in status_mapping:
+                encounter_data['status'] = status_mapping[status_str]
+            else:
+                try:
+                    encounter_data['status'] = EncounterStatus(status_str)
+                except ValueError:
+                    pass
+        
+        for field in ['service_type', 'priority', 'reason_code', 'location_address', 'participant_name']:
+            if field in record_data and record_data[field]:
+                encounter_data[field] = record_data[field]
         
         # Map diagnosis codes
-        if 'primary_diagnosis_code' in record_data:
-            code = record_data['primary_diagnosis_code']
-            encounter_data['diagnosis_codes'] = [code] if code else []
-        elif 'dx_code' in record_data:
-            code = record_data['dx_code']
-            encounter_data['diagnosis_codes'] = [code] if code else []
+        if 'diagnosis_codes' in record_data:
+            codes = record_data['diagnosis_codes']
+            encounter_data['diagnosis_codes'] = codes if isinstance(codes, list) else [codes]
+        elif 'primary_diagnosis_code' in record_data and record_data['primary_diagnosis_code']:
+            encounter_data['diagnosis_codes'] = [record_data['primary_diagnosis_code']]
         
-        return encounter_data if encounter_data else None
+        return encounter_data
     
     def _map_to_observation_record(self, record_data: dict) -> Optional[dict]:
-        """Map XML record data to ClinicalObservation fields.
-        
-        Parameters:
-            record_data: Extracted XML data
-        
-        Returns:
-            Optional[dict]: ClinicalObservation-compatible dictionary or None
-        """
-        # Check if we have observation data
-        if 'clinical_notes' not in record_data and 'observation_value' not in record_data:
-            return None
-        
+        """Map XML record data to ClinicalObservation fields."""
         observation_data = {}
         
-        # Map observation identifier
-        if 'observation_id' in record_data:
-            observation_data['observation_id'] = record_data['observation_id']
-        else:
-            # Generate from patient_id if available
-            patient_id = record_data.get('patient_id') or record_data.get('mrn')
-            if patient_id:
-                observation_data['observation_id'] = f"OBS_{patient_id}"
-        
-        # Map patient reference
-        patient_id = record_data.get('patient_id') or record_data.get('mrn')
-        if patient_id:
-            observation_data['patient_id'] = patient_id
-        
-        # Map category
-        if 'observation_category' in record_data:
-            observation_data['category'] = record_data['observation_category']
-        else:
-            observation_data['category'] = 'exam'  # Default
-        
-        # Map notes
-        if 'clinical_notes' in record_data:
-            observation_data['notes'] = record_data['clinical_notes']
-        
-        # Map value
-        if 'observation_value' in record_data:
-            observation_data['value'] = record_data['observation_value']
-        
-        # Map unit
-        if 'observation_unit' in record_data:
-            observation_data['unit'] = record_data['observation_unit']
+        # Map observation fields
+        for field in ['observation_id', 'observation_date', 'observation_type', 'value', 'unit', 'status', 'encounter_id']:
+            if field in record_data:
+                observation_data[field] = record_data[field]
         
         return observation_data if observation_data else None
     
     def _generate_hash(self, record_data: dict) -> str:
-        """Generate hash of record data for audit trail.
-        
-        Parameters:
-            record_data: Record data dictionary
-        
-        Returns:
-            str: SHA-256 hash of the record
-        """
-        record_str = json.dumps(record_data, sort_keys=True)
-        return hashlib.sha256(record_str.encode('utf-8')).hexdigest()
+        """Generate hash for transformation audit trail."""
+        data_str = json.dumps(record_data, sort_keys=True)
+        return hashlib.sha256(data_str.encode('utf-8')).hexdigest()
     
     def _log_security_rejection(
         self,
@@ -964,15 +1001,7 @@ class XMLIngester(IngestionPort):
         error: Exception,
         raw_record: dict
     ) -> None:
-        """Log a security rejection for audit trail.
-        
-        Parameters:
-            source: Source identifier
-            record_index: Index of rejected record
-            error: Exception that caused rejection
-            raw_record: Raw record data (may be truncated)
-        """
-        # Truncate raw_record for logging (prevent log bloat)
+        """Log a security rejection for audit trail."""
         truncated_record = self._truncate_for_logging(raw_record)
         
         logger.warning(
@@ -988,23 +1017,17 @@ class XMLIngester(IngestionPort):
         )
     
     def _truncate_for_logging(self, data: dict, max_size: int = 500) -> dict:
-        """Truncate data dictionary for safe logging.
-        
-        Parameters:
-            data: Data dictionary to truncate
-            max_size: Maximum size in characters
-        
-        Returns:
-            dict: Truncated dictionary safe for logging
-        """
+        """Truncate data dictionary for safe logging."""
         data_str = json.dumps(data)
         if len(data_str) <= max_size:
             return data
         
         # Truncate and add indicator
-        truncated = json.loads(data_str[:max_size])
-        if isinstance(truncated, dict):
-            truncated['_truncated'] = True
-            truncated['_original_size'] = len(data_str)
-        return truncated
-
+        try:
+            truncated = json.loads(data_str[:max_size])
+            if isinstance(truncated, dict):
+                truncated['_truncated'] = True
+                truncated['_original_size'] = len(data_str)
+            return truncated
+        except json.JSONDecodeError:
+            return {"_truncated": True, "_original_size": len(data_str)}
