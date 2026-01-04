@@ -154,13 +154,14 @@ def process_ingestion(
                         df = result.value
                         logger.info(f"Processing DataFrame batch: {len(df)} rows")
                         
-                        # Determine table name based on columns (simplified - could be improved)
-                        if 'patient_id' in df.columns:
-                            table_name = 'patients'
-                        elif 'observation_id' in df.columns:
+                        # Determine table name based on columns
+                        # Check for specific IDs first (observations/encounters have patient_id too)
+                        if 'observation_id' in df.columns:
                             table_name = 'observations'
                         elif 'encounter_id' in df.columns:
                             table_name = 'encounters'
+                        elif 'patient_id' in df.columns:
+                            table_name = 'patients'
                         else:
                             logger.warning(f"Unknown DataFrame structure, skipping batch")
                             failure_count += len(df)

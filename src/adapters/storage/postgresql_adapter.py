@@ -1093,20 +1093,91 @@ class PostgreSQLAdapter(StoragePort):
             try:
                 # Prepare column names and data
                 columns = list(df_filtered.columns)
-                values = [tuple(row) for row in df_filtered.values]
                 
-                # Build INSERT statement
+                # Convert NaT (Not a Time) values to None for datetime columns
+                # PostgreSQL can't handle NaT, so we need to convert them to None
+                df_cleaned = df_filtered.copy()
+                for col in df_cleaned.columns:
+                    if df_cleaned[col].dtype.name.startswith('datetime'):
+                        # Replace NaT with None using where() - this properly converts to None
+                        df_cleaned[col] = df_cleaned[col].where(pd.notna(df_cleaned[col]), None)
+                    elif df_cleaned[col].dtype == 'object':
+                        # Check if column contains datetime objects that might be NaT
+                        def convert_nat_to_none(x):
+                            if x is None:
+                                return None
+                            if isinstance(x, pd.Timestamp) and pd.isna(x):
+                                return None
+                            # Handle numpy datetime64 NaT
+                            if hasattr(x, 'dtype') and 'datetime' in str(x.dtype) and pd.isna(x):
+                                return None
+                            return x
+                        df_cleaned[col] = df_cleaned[col].apply(convert_nat_to_none)
+                
+                # Convert DataFrame to list of tuples, ensuring None values are properly handled
+                # Use itertuples for better control over value conversion
+                # CRITICAL: We must convert NaT to None before creating tuples
+                # Also need to handle array columns (lists) - don't check pd.isna() on arrays
+                values = []
+                for idx, row in df_cleaned.iterrows():
+                    row_values = []
+                    for col in df_cleaned.columns:
+                        val = row[col]
+                        # Skip NaT/NaN checks for list/array values (they're already handled above)
+                        if isinstance(val, (list, tuple)):
+                            row_values.append(val)
+                        # Comprehensive check for NaT/NaN values (only for non-array types)
+                        elif val is None:
+                            row_values.append(None)
+                        elif isinstance(val, pd.Timestamp) and pd.isna(val):
+                            row_values.append(None)
+                        elif hasattr(val, 'dtype') and 'datetime' in str(val.dtype) and pd.isna(val):
+                            row_values.append(None)
+                        elif not isinstance(val, (list, tuple)) and pd.isna(val):
+                            row_values.append(None)
+                        else:
+                            row_values.append(val)
+                    values.append(tuple(row_values))
+                
+                # Build INSERT statement with ON CONFLICT handling for primary keys
+                # This allows re-running ingestion without duplicate key errors
                 columns_str = ', '.join(columns)
-                placeholders = ', '.join(['%s'] * len(columns))
-                insert_sql = f"INSERT INTO {table_name} ({columns_str}) VALUES %s"
+                
+                # Determine primary key column for ON CONFLICT
+                primary_key = None
+                if table_name == 'patients':
+                    primary_key = 'patient_id'
+                elif table_name == 'encounters':
+                    primary_key = 'encounter_id'
+                elif table_name == 'observations':
+                    primary_key = 'observation_id'
+                
+                if primary_key and primary_key in columns:
+                    # Use UPSERT (INSERT ... ON CONFLICT DO UPDATE) to handle duplicates
+                    # This allows re-running ingestion without errors
+                    update_cols = [col for col in columns if col != primary_key]
+                    update_clause = ', '.join([f"{col} = EXCLUDED.{col}" for col in update_cols])
+                    # execute_values uses %s as placeholder - it will be replaced with template
+                    insert_sql = f"""
+                        INSERT INTO {table_name} ({columns_str}) 
+                        VALUES %s
+                        ON CONFLICT ({primary_key}) DO UPDATE SET {update_clause}
+                    """
+                    # Template for execute_values: one %s per column
+                    template = '(' + ', '.join(['%s'] * len(columns)) + ')'
+                else:
+                    # No primary key or conflict handling - simple INSERT
+                    insert_sql = f"INSERT INTO {table_name} ({columns_str}) VALUES %s"
+                    template = None
                 
                 # Use execute_values for efficient bulk insert
                 # This handles arrays and avoids parameter limit issues
+                # Note: execute_values supports ON CONFLICT when using a template
                 execute_values(
                     cursor,
                     insert_sql,
                     values,
-                    template=None,
+                    template=template,
                     page_size=1000  # Insert 1000 rows at a time
                 )
                 

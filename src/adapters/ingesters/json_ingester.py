@@ -256,7 +256,7 @@ class JSONIngester(IngestionPort):
                 redacted_df = self._redact_dataframe(chunk_df)
                 
                 # Validate and filter valid records
-                validated_df, failed_indices = self._validate_dataframe_chunk(
+                validated_df, failed_indices, encounters_df, observations_df = self._validate_dataframe_chunk(
                     redacted_df,
                     source,
                     chunk_count
@@ -275,9 +275,27 @@ class JSONIngester(IngestionPort):
                         f"{num_valid} records passed"
                     )
                 
-                # Yield success result with validated DataFrame
+                # Yield success result with validated patient DataFrame
                 if len(validated_df) > 0:
                     yield Result.success_result(validated_df)
+                
+                # Yield encounters DataFrame if present
+                if len(encounters_df) > 0:
+                    yield Result.success_result(encounters_df)
+                
+                # Yield observations DataFrame if present
+                if len(observations_df) > 0:
+                    logger.info(f"Yielding observations DataFrame with {len(observations_df)} rows for chunk {chunk_count}")
+                    yield Result.success_result(observations_df)
+                else:
+                    # Log if observations were expected but not found
+                    total_obs_in_dict = sum(len(obs_list) for obs_list in self._patient_observations.values())
+                    if total_obs_in_dict > 0:
+                        logger.warning(
+                            f"Chunk {chunk_count}: Expected observations but DataFrame is empty. "
+                            f"Total observations in dictionary: {total_obs_in_dict}, "
+                            f"Patients in chunk: {len(chunk_df)}"
+                        )
                 
                 # Yield failure result if entire chunk failed
                 if num_failed == len(chunk_df) and num_valid == 0:
@@ -389,6 +407,8 @@ class JSONIngester(IngestionPort):
         """
         valid_records = []
         failed_indices = []
+        encounters_records = []  # Store encounters for this chunk
+        observations_records = []  # Store observations for this chunk
         
         # Validate each row individually (required for Pydantic)
         for idx, row in df.iterrows():
@@ -437,11 +457,95 @@ class JSONIngester(IngestionPort):
                 # Create PatientRecord (validates and applies additional redaction via validators)
                 patient = PatientRecord(**{k: v for k, v in row_dict.items() if k in PatientRecord.model_fields})
                 
-                # Create minimal GoldenRecord (encounters/observations empty for simplified JSON processing)
+                # Extract encounters and observations for this patient
+                patient_id = patient.patient_id
+                encounters = []
+                observations = []
+                
+                # Create EncounterRecord objects from stored encounters
+                if patient_id in self._patient_encounters:
+                    for enc_data in self._patient_encounters[patient_id]:
+                        try:
+                            # Map JSON fields to EncounterRecord fields
+                            encounter_dict = {
+                                'encounter_id': enc_data.get('encounter_id'),
+                                'patient_id': patient_id,
+                                'status': enc_data.get('status'),
+                                'class_code': enc_data.get('class_code'),
+                                'type': enc_data.get('type'),
+                                'service_type': enc_data.get('service_type'),
+                                'priority': enc_data.get('priority'),
+                                'period_start': self._parse_datetime(enc_data.get('period_start')),
+                                'period_end': self._parse_datetime(enc_data.get('period_end')),
+                                'length_minutes': enc_data.get('length_minutes'),
+                                'reason_code': enc_data.get('reason_code'),
+                                'diagnosis_codes': enc_data.get('diagnosis_codes', []),
+                                'facility_name': enc_data.get('facility_name'),
+                                'location_address': enc_data.get('location_address'),
+                                'participant_name': enc_data.get('participant_name'),
+                                'participant_role': enc_data.get('participant_role'),
+                                'service_provider': enc_data.get('service_provider'),
+                            }
+                            # Filter out None values for optional fields
+                            encounter_dict = {k: v for k, v in encounter_dict.items() if v is not None or k in ['encounter_id', 'patient_id', 'class_code']}
+                            if encounter_dict.get('encounter_id'):
+                                encounter = EncounterRecord(**{k: v for k, v in encounter_dict.items() if k in EncounterRecord.model_fields})
+                                encounters.append(encounter)
+                        except Exception as e:
+                            logger.warning(f"Failed to create EncounterRecord for patient {patient_id}: {str(e)}")
+                
+                # Create ClinicalObservation objects from stored observations
+                if patient_id in self._patient_observations:
+                    for obs_data in self._patient_observations[patient_id]:
+                        try:
+                            # Map JSON fields to ClinicalObservation fields
+                            observation_dict = {
+                                'observation_id': obs_data.get('observation_id'),
+                                'patient_id': patient_id,
+                                'encounter_id': obs_data.get('encounter_id'),
+                                'status': obs_data.get('status'),
+                                'category': obs_data.get('category'),
+                                'code': obs_data.get('code'),
+                                'effective_date': self._parse_datetime(obs_data.get('effective_date')),
+                                'issued': self._parse_datetime(obs_data.get('issued')),
+                                'performer_name': obs_data.get('performer_name'),
+                                'value': obs_data.get('value'),
+                                'unit': obs_data.get('unit'),
+                                'interpretation': obs_data.get('interpretation'),
+                                'body_site': obs_data.get('body_site'),
+                                'method': obs_data.get('method'),
+                                'device': obs_data.get('device'),
+                                'reference_range': obs_data.get('reference_range'),
+                                'notes': obs_data.get('notes'),
+                            }
+                            
+                            # Validate required fields before proceeding
+                            if not observation_dict.get('observation_id'):
+                                logger.warning(f"Observation missing observation_id for patient {patient_id}, skipping")
+                                continue
+                            
+                            if not observation_dict.get('category'):
+                                logger.warning(f"Observation {observation_dict.get('observation_id')} missing category, skipping")
+                                continue
+                            
+                            # Filter to only include fields that exist in ClinicalObservation model
+                            # Keep all fields (including None) that are in the model
+                            filtered_dict = {k: v for k, v in observation_dict.items() if k in ClinicalObservation.model_fields}
+                            
+                            # Create ClinicalObservation object
+                            observation = ClinicalObservation(**filtered_dict)
+                            observations.append(observation)
+                        except Exception as e:
+                            logger.warning(
+                                f"Failed to create ClinicalObservation for patient {patient_id}, observation_id={obs_data.get('observation_id')}: {str(e)}",
+                                exc_info=True
+                            )
+                
+                # Create GoldenRecord with encounters and observations
                 golden_record = GoldenRecord(
                     patient=patient,
-                    encounters=[],
-                    observations=[],
+                    encounters=encounters,
+                    observations=observations,
                     source_adapter=self.adapter_name,
                     transformation_hash=self._generate_hash_from_row(row_dict)
                 )
@@ -453,6 +557,21 @@ class JSONIngester(IngestionPort):
                 patient_dict['source_adapter'] = golden_record.source_adapter
                 patient_dict['transformation_hash'] = golden_record.transformation_hash
                 valid_records.append(patient_dict)
+                
+                # Store encounters and observations for separate DataFrame creation
+                for encounter in encounters:
+                    enc_dict = encounter.model_dump(exclude_none=False)
+                    enc_dict['ingestion_timestamp'] = golden_record.ingestion_timestamp
+                    enc_dict['source_adapter'] = golden_record.source_adapter
+                    enc_dict['transformation_hash'] = golden_record.transformation_hash
+                    encounters_records.append(enc_dict)
+                
+                for observation in observations:
+                    obs_dict = observation.model_dump(exclude_none=False)
+                    obs_dict['ingestion_timestamp'] = golden_record.ingestion_timestamp
+                    obs_dict['source_adapter'] = golden_record.source_adapter
+                    obs_dict['transformation_hash'] = golden_record.transformation_hash
+                    observations_records.append(obs_dict)
                 
             except (PydanticValidationError, ValidationError, TransformationError) as e:
                 failed_indices.append(idx)
@@ -476,7 +595,54 @@ class JSONIngester(IngestionPort):
         else:
             validated_df = pd.DataFrame()
         
-        return validated_df, failed_indices
+        # Create DataFrames for encounters and observations
+        encounters_df = pd.DataFrame(encounters_records) if encounters_records else pd.DataFrame()
+        observations_df = pd.DataFrame(observations_records) if observations_records else pd.DataFrame()
+        
+        # Log DataFrame creation for debugging
+        if len(observations_records) > 0:
+            logger.debug(
+                f"Created observations DataFrame with {len(observations_df)} rows from {len(observations_records)} records. "
+                f"Columns: {list(observations_df.columns) if not observations_df.empty else 'empty'}"
+            )
+        elif len(observations_records) == 0 and len(self._patient_observations) > 0:
+            # Log warning if we have observations in the dictionary but none in records
+            total_obs = sum(len(obs_list) for obs_list in self._patient_observations.values())
+            logger.warning(
+                f"Chunk {chunk_number}: {total_obs} observations in dictionary but 0 in records. "
+                f"Patients processed: {len(valid_records)}"
+            )
+        
+        return validated_df, failed_indices, encounters_df, observations_df
+    
+    def _parse_datetime(self, value: Optional[Any]) -> Optional[datetime]:
+        """Parse datetime from various formats.
+        
+        Parameters:
+            value: String, datetime, or None
+            
+        Returns:
+            datetime object or None
+        """
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value
+        if isinstance(value, str):
+            # Try common datetime formats
+            formats = [
+                "%Y-%m-%dT%H:%M:%S",
+                "%Y-%m-%dT%H:%M:%S.%f",
+                "%Y-%m-%d %H:%M:%S",
+                "%Y-%m-%d",
+            ]
+            for fmt in formats:
+                try:
+                    return datetime.strptime(value, fmt)
+                except ValueError:
+                    continue
+            logger.warning(f"Could not parse datetime: {value}")
+        return None
     
     def _generate_hash_from_row(self, row_dict: Dict[str, Any]) -> str:
         """Generate hash from row dictionary for audit trail.
