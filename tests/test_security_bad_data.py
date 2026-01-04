@@ -91,18 +91,21 @@ class TestXSSAttacks:
     def xss_json_file(self, tmp_path):
         """Create JSON file with XSS attack payloads."""
         test_file = tmp_path / "xss_attack.json"
+        # JSON ingester expects nested structure with 'patient' key for DataFrame processing
         json_data = [
             {
-                "patient_id": "XSS002",
-                "given_names": ["<script>alert('XSS')</script>Jane"],
-                "family_name": "Smith",
-                "date_of_birth": "1995-05-15",
-                "phone": "<img src=x onerror=alert(1)>",
-                "email": "test@example.com<script>alert('XSS')</script>",
-                "address_line1": "456 Oak St<iframe src=javascript:alert(1)>",
-                "city": "Springfield",
-                "state": "IL",
-                "postal_code": "62701"
+                "patient": {
+                    "patient_id": "XSS002",
+                    "given_names": ["<script>alert('XSS')</script>Jane"],
+                    "family_name": "Smith",
+                    "date_of_birth": "1995-05-15",
+                    "phone": "<img src=x onerror=alert(1)>",
+                    "email": "test@example.com<script>alert('XSS')</script>",
+                    "address_line1": "456 Oak St<iframe src=javascript:alert(1)>",
+                    "city": "Springfield",
+                    "state": "IL",
+                    "postal_code": "62701"
+                }
             }
         ]
         import json
@@ -341,14 +344,16 @@ class TestPIILeakageAttempts:
         test_file = tmp_path / "pii_identifiers.json"
         json_data = [
             {
-                "patient_id": "PII002",
-                "identifiers": ["123-45-6789", "SSN: 987-65-4321", "MRN123"],
-                "given_names": ["Jane"],
-                "family_name": "Smith",
-                "date_of_birth": "1995-05-15",
-                "city": "Springfield",
-                "state": "IL",
-                "postal_code": "62701"
+                "patient": {
+                    "patient_id": "PII002",
+                    "identifiers": ["123-45-6789", "SSN: 987-65-4321", "MRN123"],
+                    "given_names": ["Jane"],
+                    "family_name": "Smith",
+                    "date_of_birth": "1995-05-15",
+                    "city": "Springfield",
+                    "state": "IL",
+                    "postal_code": "62701"
+                }
             }
         ]
         import json
@@ -483,16 +488,18 @@ class TestPathTraversalAttempts:
         test_file = tmp_path / "path_traversal.json"
         json_data = [
             {
-                "patient_id": "PATH001",
-                "given_names": ["John"],
-                "family_name": "Doe",
-                "date_of_birth": "1990-01-01",
-                "city": "Springfield",
-                "state": "IL",
-                "postal_code": "62701",
-                # These fields will be in the DataFrame but not in PatientRecord schema
-                "file_path": "../../../etc/passwd",
-                "attachment": "..\\..\\..\\windows\\system32\\config\\sam"
+                "patient": {
+                    "patient_id": "PATH001",
+                    "given_names": ["John"],
+                    "family_name": "Doe",
+                    "date_of_birth": "1990-01-01",
+                    "city": "Springfield",
+                    "state": "IL",
+                    "postal_code": "62701",
+                    # These fields will be in the DataFrame but not in PatientRecord schema
+                    "file_path": "../../../etc/passwd",
+                    "attachment": "..\\..\\..\\windows\\system32\\config\\sam"
+                }
             }
         ]
         import json

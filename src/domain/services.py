@@ -136,7 +136,13 @@ class RedactorService:
         if not value:
             return None
         
-        value_str = str(value)
+        value_str = str(value).strip()
+        
+        # Security: Redact if it contains XSS patterns
+        xss_patterns = ['<script', '<img', '<iframe', 'javascript:', 'onerror=', 'onload=']
+        if any(pattern in value_str.lower() for pattern in xss_patterns):
+            return RedactorService.PHONE_MASK
+        
         if RedactorService.PHONE_PATTERN.search(value_str):
             return RedactorService.PHONE_MASK
         
@@ -169,7 +175,13 @@ class RedactorService:
         if not value:
             return None
         
-        value_str = str(value)
+        value_str = str(value).strip()
+        
+        # Security: Redact if it contains XSS patterns
+        xss_patterns = ['<script', '<img', '<iframe', 'javascript:', 'onerror=', 'onload=']
+        if any(pattern in value_str.lower() for pattern in xss_patterns):
+            return RedactorService.EMAIL_MASK
+        
         if RedactorService.EMAIL_PATTERN.search(value_str):
             return RedactorService.EMAIL_MASK
         
@@ -194,13 +206,19 @@ class RedactorService:
             result = value.copy().astype(str)
             result = result.replace('nan', '')
             value_str = result.str.strip()
+            # Security: Redact if it contains XSS patterns
+            xss_patterns = ['<script', '<img', '<iframe', 'javascript:', 'onerror=', 'onload=']
+            xss_mask = value_str.str.lower().str.contains('|'.join(xss_patterns), na=False, regex=False)
+            result[xss_mask] = RedactorService.NAME_MASK
+            
             # Simple heuristic: if it looks like a name (capitalized, 1-3 words)
-            mask = (
+            name_mask = (
                 (value_str.str.len() > 0) &
                 (value_str.str[0].str.isupper()) &
-                (value_str.str.split().str.len() <= 3)
+                (value_str.str.split().str.len() <= 3) &
+                (~xss_mask)  # Don't double-redact XSS patterns
             )
-            result[mask] = RedactorService.NAME_MASK
+            result[name_mask] = RedactorService.NAME_MASK
             result[value.isna()] = None
             return result
         
@@ -208,9 +226,17 @@ class RedactorService:
         if not value:
             return None
         
-        # Simple heuristic: if it looks like a name (capitalized words), redact it
         value_str = str(value).strip()
-        if value_str and value_str[0].isupper() and len(value_str.split()) <= 3:
+        if not value_str:
+            return None
+        
+        # Security: Redact if it contains XSS patterns (security concern, not just PII)
+        xss_patterns = ['<script', '<img', '<iframe', 'javascript:', 'onerror=', 'onload=']
+        if any(pattern in value_str.lower() for pattern in xss_patterns):
+            return RedactorService.NAME_MASK
+        
+        # Simple heuristic: if it looks like a name (capitalized words), redact it
+        if value_str[0].isupper() and len(value_str.split()) <= 3:
             return RedactorService.NAME_MASK
         
         return value

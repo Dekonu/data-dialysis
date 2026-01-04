@@ -1,6 +1,6 @@
 # Examples
 
-This directory contains example scripts demonstrating how to use Clinical-Sieve.
+This directory contains example scripts demonstrating how to use Data-Dialysis.
 
 ## End-to-End Flow Example
 
@@ -32,7 +32,7 @@ The example will:
 
 ```
 ======================================================================
-Clinical-Sieve: End-to-End Data Flow Demonstration
+Data-Dialysis: End-to-End Data Flow Demonstration
 ======================================================================
 
 Creating Sample Data Files

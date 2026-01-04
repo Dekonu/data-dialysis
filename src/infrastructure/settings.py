@@ -16,7 +16,7 @@ from typing import Optional
 from src.infrastructure.config_manager import ConfigManager, get_database_config, DatabaseConfig
 
 # Application metadata
-APP_NAME = "Clinical-Sieve"
+APP_NAME = "Data-Dialysis"
 APP_VERSION = "1.0.0"
 
 # Default batch size for processing (can be overridden via environment)

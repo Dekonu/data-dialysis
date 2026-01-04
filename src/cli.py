@@ -1,4 +1,4 @@
-"""Command Line Interface for Clinical-Sieve Data Ingestion Engine.
+"""Command Line Interface for Data-Dialysis Data Ingestion Engine.
 
 This module provides a modern CLI using Typer for running the ingestion pipeline
 with comprehensive options and security features.
@@ -32,7 +32,7 @@ from src.main import process_ingestion
 # Initialize Typer app and Rich console
 app = typer.Typer(
     name="datadialysis",
-    help="Clinical-Sieve: Self-Securing Data Ingestion Engine",
+    help="Data-Dialysis: Self-Securing Data Ingestion Engine",
     add_completion=False
 )
 console = Console()
@@ -82,7 +82,7 @@ def ingest(
         raise typer.Exit(code=1)
     
     # Print startup information
-    console.print(f"\n[bold blue]Clinical-Sieve Data Ingestion Engine[/bold blue]")
+    console.print(f"\n[bold blue]Data-Dialysis Data Ingestion Engine[/bold blue]")
     console.print(f"[dim]Input file:[/dim] {input_file}")
     console.print(f"[dim]Database:[/dim] {settings.db_config.db_type}")
     if settings.db_config.db_type == "duckdb":
@@ -301,9 +301,9 @@ def info() -> None:
 def main_callback(
     version: bool = typer.Option(False, "--version", help="Show version information")
 ) -> None:
-    """Clinical-Sieve: Self-Securing Data Ingestion Engine."""
+    """Data-Dialysis: Self-Securing Data Ingestion Engine."""
     if version:
-        console.print("Clinical-Sieve v1.0.0")
+        console.print("Data-Dialysis v1.0.0")
         raise typer.Exit()
 
 

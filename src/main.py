@@ -1,4 +1,4 @@
-"""Main entry point for Clinical-Sieve data ingestion pipeline.
+"""Main entry point for Data-Dialysis data ingestion pipeline.
 
 This module provides the command-line interface for ingesting clinical data
 from various sources (CSV, JSON, XML) and persisting it to configured storage.
@@ -236,7 +236,7 @@ def process_ingestion(
 
 
 def main():
-    """Main entry point for the Clinical-Sieve ingestion pipeline."""
+    """Main entry point for the Data-Dialysis ingestion pipeline."""
     parser = argparse.ArgumentParser(
         description=f"{settings.app_name} - Self-Securing Clinical Data Ingestion Pipeline",
         formatter_class=argparse.RawDescriptionHelpFormatter,

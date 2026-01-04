@@ -1,6 +1,6 @@
-# Contributing to Clinical-Sieve
+# Contributing to Data-Dialysis
 
-Thank you for your interest in contributing to Clinical-Sieve! This document provides guidelines and instructions for contributing to this security-critical project.
+Thank you for your interest in contributing to Data-Dialysis! This document provides guidelines and instructions for contributing to this security-critical project.
 
 ## 🎯 Getting Started
 
@@ -280,5 +280,5 @@ Include:
 
 ## 🙏 Thank You
 
-Your contributions help make Clinical-Sieve more secure, robust, and useful. We appreciate your time and effort!
+Your contributions help make Data-Dialysis more secure, robust, and useful. We appreciate your time and effort!
 

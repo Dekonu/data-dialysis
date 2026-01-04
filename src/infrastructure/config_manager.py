@@ -22,8 +22,9 @@ import logging
 from pathlib import Path
 from typing import Optional, Dict, Any
 from enum import Enum
+from urllib.parse import urlparse, parse_qs, unquote
 
-from pydantic import BaseModel, Field, field_validator, SecretStr
+from pydantic import BaseModel, Field, field_validator, SecretStr, model_validator
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +102,109 @@ class DatabaseConfig(BaseModel):
             raise ValueError(f"Database directory does not exist: {db_path_obj.parent}")
         
         return str(db_path_obj)
+    
+    @staticmethod
+    def _parse_postgresql_connection_string(conn_str: str) -> Dict[str, Any]:
+        """Parse PostgreSQL connection string into individual components.
+        
+        Supports formats:
+        - postgresql://user:pass@host:port/database?sslmode=require
+        - postgres://user:pass@host:port/database?sslmode=require
+        
+        Parameters:
+            conn_str: PostgreSQL connection string
+        
+        Returns:
+            Dictionary with parsed components (host, port, database, username, password, ssl_mode)
+        """
+        parsed = urlparse(conn_str)
+        
+        # Support both postgresql:// and postgres:// schemes
+        if parsed.scheme not in ['postgresql', 'postgres']:
+            raise ValueError(f"Unsupported connection string scheme: {parsed.scheme}")
+        
+        result = {}
+        
+        # Parse host and port
+        result['host'] = parsed.hostname
+        result['port'] = parsed.port
+        
+        # Parse database name (remove leading slash)
+        result['database'] = parsed.path.lstrip('/') if parsed.path else None
+        
+        # Parse username and password
+        result['username'] = unquote(parsed.username) if parsed.username else None
+        result['password'] = unquote(parsed.password) if parsed.password else None
+        
+        # Parse query parameters (e.g., sslmode)
+        query_params = parse_qs(parsed.query)
+        if 'sslmode' in query_params:
+            result['ssl_mode'] = query_params['sslmode'][0]
+        
+        return result
+    
+    @model_validator(mode='after')
+    def sync_connection_string_and_fields(self) -> 'DatabaseConfig':
+        """Synchronize connection string and individual fields.
+        
+        If connection_string is provided but individual fields are missing, parse connection_string.
+        If individual fields are provided but connection_string is missing, construct connection_string.
+        
+        Security Impact:
+            - Parsed credentials are stored as SecretStr
+            - Connection string parsing is safe (no code execution)
+        """
+        # If connection_string is provided, parse it to populate individual fields
+        # Connection string ALWAYS takes precedence over individual fields
+        if self.connection_string and self.db_type in ['postgresql', 'mysql']:
+            conn_str = self.connection_string.get_secret_value()
+            
+            try:
+                parsed = self._parse_postgresql_connection_string(conn_str)
+                
+                # Connection string takes precedence - override all fields from connection string
+                if parsed.get('host'):
+                    self.host = parsed['host']
+                if parsed.get('port'):
+                    self.port = parsed['port']
+                if parsed.get('database'):
+                    self.database = parsed['database']
+                if parsed.get('username'):
+                    self.username = parsed['username']
+                if parsed.get('password'):
+                    self.password = SecretStr(parsed['password'])
+                if parsed.get('ssl_mode'):
+                    self.ssl_mode = parsed['ssl_mode']
+                    
+            except Exception as e:
+                logger.warning(f"Failed to parse connection string, using as-is: {str(e)}")
+        
+        # If individual fields are provided but connection_string is missing, construct it
+        elif not self.connection_string and self.db_type in ['postgresql', 'mysql']:
+            if all([self.host, self.database]):
+                # Construct connection string from individual fields
+                # URL-encode username and password to handle special characters
+                from urllib.parse import quote_plus
+                
+                password_part = ""
+                if self.password:
+                    password_value = self.password.get_secret_value()
+                    password_part = f":{quote_plus(password_value)}"
+                
+                username_part = quote_plus(self.username) if self.username else ""
+                
+                ssl_part = ""
+                if self.ssl_mode:
+                    ssl_part = f"?sslmode={self.ssl_mode}"
+                
+                if self.db_type == "postgresql":
+                    conn_str = f"postgresql://{username_part}{password_part}@{self.host}:{self.port or 5432}/{self.database}{ssl_part}"
+                else:  # mysql
+                    conn_str = f"mysql://{username_part}{password_part}@{self.host}:{self.port or 3306}/{self.database}{ssl_part}"
+                
+                self.connection_string = SecretStr(conn_str)
+        
+        return self
     
     def get_connection_string(self) -> str:
         """Get connection string for database.
@@ -205,7 +309,22 @@ class ConfigManager:
         Security Impact:
             - Credentials are read from environment (never logged)
             - Supports .env files via python-dotenv (if installed)
+            - .env file is automatically loaded if present in project root
         """
+        # Try to load .env file if python-dotenv is available
+        try:
+            from dotenv import load_dotenv
+            # Load .env file from project root (where this file is located)
+            env_path = Path(__file__).parent.parent.parent / ".env"
+            if env_path.exists():
+                load_dotenv(env_path)
+                logger.debug(f"Loaded environment variables from {env_path}")
+        except ImportError:
+            # python-dotenv not installed, skip .env loading
+            pass
+        except Exception as e:
+            logger.warning(f"Failed to load .env file: {str(e)}")
+        
         config_data = {
             "database": {
                 "db_type": os.getenv("DD_DB_TYPE", "duckdb"),

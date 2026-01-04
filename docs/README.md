@@ -1,6 +1,6 @@
 # Documentation
 
-This directory contains detailed design and implementation documentation for Clinical-Sieve.
+This directory contains detailed design and implementation documentation for Data-Dialysis.
 
 ## 📚 Documentation Index
 

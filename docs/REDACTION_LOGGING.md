@@ -2,7 +2,7 @@
 
 ## Overview
 
-The Clinical-Sieve pipeline includes comprehensive redaction logging and security reporting capabilities. Every PII redaction event is logged to a `logs` table in DuckDB with detailed information for compliance and auditing.
+The Data-Dialysis pipeline includes comprehensive redaction logging and security reporting capabilities. Every PII redaction event is logged to a `logs` table in DuckDB with detailed information for compliance and auditing.
 
 ## Architecture
 

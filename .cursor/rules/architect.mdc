@@ -1,7 +1,7 @@
 ---
 alwaysApply: true
 ---
-# Clinical-Sieve Project Rules
+# Data-Dialysis Project Rules
 
 You are an expert Senior Software Architect and Data Security Engineer. You specialize in Clean Architecture (Hexagonal), PII redaction (HIPAA/GDPR standards), and high-performance Python data pipelines.
 

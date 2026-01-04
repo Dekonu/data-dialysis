@@ -1,4 +1,4 @@
-"""Domain layer for Clinical-Sieve.
+"""Domain layer for Data-Dialysis.
 
 This module contains the core business logic and golden record schemas.
 All domain models are pure Python with no external dependencies beyond Pydantic.

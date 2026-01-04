@@ -350,7 +350,7 @@ def demonstrate_xml_flow(xml_file: Path, xml_config_file: Path, db_path: str):
 def main():
     """Run end-to-end flow demonstration."""
     print("=" * 70)
-    print("Clinical-Sieve: End-to-End Data Flow Demonstration")
+    print("Data-Dialysis: End-to-End Data Flow Demonstration")
     print("=" * 70)
     print("\nThis example demonstrates the complete data flow:")
     print("  1. CSV/JSON -> Pandas DataFrame -> PII Redaction -> DuckDB")

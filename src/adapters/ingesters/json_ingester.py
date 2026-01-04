@@ -384,6 +384,10 @@ class JSONIngester(IngestionPort):
                 
                 # Clean up NaN values and convert types
                 for key, value in row_dict.items():
+                    # Skip list/array values (like identifiers) - pd.isna() doesn't work on them
+                    if isinstance(value, (list, tuple)):
+                        continue
+                    
                     if pd.isna(value):
                         row_dict[key] = None
                     elif isinstance(value, float) and pd.isna(value):

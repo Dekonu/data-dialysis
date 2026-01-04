@@ -1,8 +1,8 @@
-# 🛡️ Threat Model: Clinical-Sieve Security Architecture
+# 🛡️ Threat Model: Data-Dialysis Security Architecture
 
 ## Executive Summary
 
-Clinical-Sieve is a **self-securing data ingestion engine** designed to process clinical data from untrusted sources while maintaining HIPAA/GDPR compliance and preventing data poisoning attacks. This document outlines the threat model, attack vectors, and defensive mechanisms implemented in the system.
+Data-Dialysis is a **self-securing data ingestion engine** designed to process clinical data from untrusted sources while maintaining HIPAA/GDPR compliance and preventing data poisoning attacks. This document outlines the threat model, attack vectors, and defensive mechanisms implemented in the system.
 
 ---
 
@@ -420,5 +420,5 @@ The system implements **multiple layers of defense**:
 
 **Last Updated:** 2025-01-XX  
 **Version:** 1.0.0  
-**Maintainer:** Clinical-Sieve Security Team
+**Maintainer:** Data-Dialysis Security Team
 

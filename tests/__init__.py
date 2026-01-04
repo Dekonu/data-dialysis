@@ -1,2 +1,2 @@
-"""Test suite for Clinical-Sieve."""
+"""Test suite for Data-Dialysis."""
 

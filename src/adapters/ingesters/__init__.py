@@ -1,4 +1,4 @@
-"""Ingestion adapters for Clinical-Sieve.
+"""Ingestion adapters for Data-Dialysis.
 
 This module contains ingestion adapters that implement the IngestionPort interface
 for reading data from various sources (CSV, JSON, XML, etc.).
