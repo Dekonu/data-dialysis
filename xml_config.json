@@ -1,0 +1,21 @@
+{
+  "root_element": "./PatientRecord",
+  "fields": {
+    "mrn": "./MRN",
+    "patient_name": "./Demographics/FullName",
+    "patient_dob": "./Demographics/BirthDate",
+    "patient_gender": "./Demographics/Gender",
+    "ssn": "./Demographics/SSN",
+    "phone": "./Demographics/Phone",
+    "email": "./Demographics/Email",
+    "address_line1": "./Demographics/Address/Street",
+    "city": "./Demographics/Address/City",
+    "state": "./Demographics/Address/State",
+    "postal_code": "./Demographics/Address/ZIP",
+    "encounter_date": "./Visit/AdmitDate",
+    "encounter_status": "./Visit/Status",
+    "encounter_type": "./Visit/Type",
+    "primary_diagnosis_code": "./Visit/DxCode",
+    "clinical_notes": "./Notes/ProgressNote"
+  }
+}

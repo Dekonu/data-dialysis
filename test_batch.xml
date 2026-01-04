@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ClinicalData>
+    <!-- Valid Record 1: Should pass validation -->
+    <PatientRecord>
+        <MRN>MRN001</MRN>
+        <Demographics>
+            <FullName>John Doe</FullName>
+            <BirthDate>1990-01-01</BirthDate>
+            <Gender>male</Gender>
+            <SSN>123-45-6789</SSN>
+            <Phone>555-123-4567</Phone>
+            <Email>john.doe@example.com</Email>
+            <Address>
+                <Street>123 Main St</Street>
+                <City>Springfield</City>
+                <State>IL</State>
+                <ZIP>62701</ZIP>
+            </Address>
+        </Demographics>
+        <Visit>
+            <AdmitDate>2023-01-01T10:00:00</AdmitDate>
+            <Status>finished</Status>
+            <Type>outpatient</Type>
+            <DxCode>I10</DxCode>
+        </Visit>
+        <Notes>
+            <ProgressNote>Blood pressure normal. Patient SSN: 123-45-6789</ProgressNote>
+        </Notes>
+    </PatientRecord>
+    
+    <!-- Invalid Record 2: MRN too short - should be rejected -->
+    <PatientRecord>
+        <MRN>AB</MRN>
+        <Demographics>
+            <FullName>Jane Smith</FullName>
+            <BirthDate>1995-05-15</BirthDate>
+            <Gender>female</Gender>
+            <SSN>987-65-4321</SSN>
+            <Phone>555-987-6543</Phone>
+        </Demographics>
+        <Visit>
+            <AdmitDate>2023-01-01T10:00:00</AdmitDate>
+            <Status>arrived</Status>
+            <Type>outpatient</Type>
+        </Visit>
+    </PatientRecord>
+    
+    <!-- Valid Record 3: Should pass validation -->
+    <PatientRecord>
+        <MRN>MRN003</MRN>
+        <Demographics>
+            <FullName>Bob Johnson</FullName>
+            <BirthDate>1985-03-20</BirthDate>
+            <Gender>male</Gender>
+            <Address>
+                <Street>456 Oak Ave</Street>
+                <City>Los Angeles</City>
+                <State>CA</State>
+                <ZIP>90210</ZIP>
+            </Address>
+        </Demographics>
+        <Visit>
+            <AdmitDate>2023-01-02T14:00:00</AdmitDate>
+            <Status>finished</Status>
+            <Type>outpatient</Type>
+        </Visit>
+        <Notes>
+            <ProgressNote>Temperature: 98.6F. All vital signs normal.</ProgressNote>
+        </Notes>
+    </PatientRecord>
+    
+    <!-- Invalid Record 4: Future DOB - should be rejected -->
+    <PatientRecord>
+        <MRN>MRN004</MRN>
+        <Demographics>
+            <FullName>Alice Williams</FullName>
+            <BirthDate>2030-01-01</BirthDate>
+            <Gender>female</Gender>
+        </Demographics>
+        <Visit>
+            <AdmitDate>2023-01-01T10:00:00</AdmitDate>
+            <Status>finished</Status>
+            <Type>outpatient</Type>
+        </Visit>
+    </PatientRecord>
+</ClinicalData>
