@@ -214,6 +214,7 @@ class TestEnvironmentVariables:
         env_vars_to_clear = [
             'DD_DB_CONNECTION_STRING',  # Clear connection string to force field-based construction
             'DD_DB_DATABASE',  # Clear any alternative database name
+            'DD_DB_NAME',  # Clear existing database name
         ]
         cleared_values = {}
         for var in env_vars_to_clear:
@@ -221,16 +222,21 @@ class TestEnvironmentVariables:
                 cleared_values[var] = os.environ.pop(var)
         
         try:
-            with patch.dict(os.environ, {
-                'DD_DB_TYPE': 'postgresql',
-                'DD_DB_HOST': 'localhost',
-                'DD_DB_PORT': '5432',
-                'DD_DB_NAME': 'mydb',
-                'DD_DB_USER': 'user',
-                'DD_DB_PASSWORD': 'pass',
-                'DD_DB_SSL_MODE': 'require'
-            }, clear=False):
+            # Mock load_dotenv to prevent .env file from overriding our test values
+            # Since load_dotenv is imported inside the try block, we need to patch it at the dotenv module level
+            # This prevents the .env file from being loaded and overriding our test environment variables
+            with patch('dotenv.load_dotenv', side_effect=lambda *args, **kwargs: None), \
+                 patch.dict(os.environ, {
+                    'DD_DB_TYPE': 'postgresql',
+                    'DD_DB_HOST': 'localhost',
+                    'DD_DB_PORT': '5432',
+                    'DD_DB_NAME': 'mydb',
+                    'DD_DB_USER': 'user',
+                    'DD_DB_PASSWORD': 'pass',
+                    'DD_DB_SSL_MODE': 'require'
+                }, clear=False):
                 # Force reload by creating a new ConfigManager
+                # This will call from_environment() which will try to load .env, but our mock prevents it
                 config_manager = ConfigManager.from_environment()
                 config = config_manager.get_database_config()
                 
