@@ -12,7 +12,13 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { AuditExportButtons } from '@/components/dashboard/audit-export-buttons';
-import { AuditDetailsCell } from '@/components/dashboard/audit-details-cell';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/components/ui/tooltip';
+import { Badge } from '@/components/ui/badge';
 import type { TimeRange } from '@/types/api';
 
 interface AuditLogsContentProps {
@@ -111,62 +117,85 @@ async function AuditLogsContent({ searchParams }: AuditLogsContentProps) {
                     <TableHead>Event Type</TableHead>
                     <TableHead>Severity</TableHead>
                     <TableHead>Source</TableHead>
+                    <TableHead>Table</TableHead>
                     <TableHead>Record ID</TableHead>
-                    <TableHead>Details</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {auditLogs.logs.map((log) => (
-                    <TableRow key={log.audit_id}>
-                      <TableCell className="font-mono text-xs">
-                        {new Date(log.event_timestamp).toLocaleString()}
-                      </TableCell>
-                      <TableCell>
-                        <Badge variant="outline">{log.event_type}</Badge>
-                      </TableCell>
-                      <TableCell>
-                        {log.severity && (
-                          <Badge variant={getSeverityVariant(log.severity)}>
-                            {log.severity}
-                          </Badge>
-                        )}
-                      </TableCell>
-                      <TableCell>
-                        {(() => {
-                          // Try to get source_adapter from the log entry first
-                          let source = log.source_adapter;
-                          
-                          // If not available, try to extract from details
-                          if ((!source || !source.trim()) && log.details) {
-                            const details = log.details as Record<string, unknown>;
-                            source = 
-                              (details?.source_adapter as string) ||
-                              (details?.source as string) ||
-                              (details?.adapter as string) ||
-                              null;
-                          }
-                          
-                          // Display source_adapter if available
-                          if (source && typeof source === 'string' && source.trim()) {
-                            return (
+                  <TooltipProvider>
+                    {auditLogs.logs.map((log) => {
+                      // Get source adapter
+                      let source = log.source_adapter;
+                      if ((!source || !source.trim()) && log.details) {
+                        const details = log.details as Record<string, unknown>;
+                        source = 
+                          (details?.source_adapter as string) ||
+                          (details?.source as string) ||
+                          (details?.adapter as string) ||
+                          null;
+                      }
+                      
+                      const hasTableInfo = log.table_name && log.table_name.trim();
+                      const hasRowCount = log.row_count !== null && log.row_count !== undefined;
+                      
+                      return (
+                        <TableRow key={log.audit_id}>
+                          <TableCell className="font-mono text-xs">
+                            {new Date(log.event_timestamp).toLocaleString()}
+                          </TableCell>
+                          <TableCell>
+                            <Badge variant="outline">{log.event_type}</Badge>
+                          </TableCell>
+                          <TableCell>
+                            {log.severity ? (
+                              <Badge variant={getSeverityVariant(log.severity)}>
+                                {log.severity}
+                              </Badge>
+                            ) : (
+                              <span className="text-xs text-muted-foreground">—</span>
+                            )}
+                          </TableCell>
+                          <TableCell>
+                            {source && typeof source === 'string' && source.trim() ? (
                               <Badge variant="outline" className="font-normal">
                                 {source.trim()}
                               </Badge>
-                            );
-                          }
-                          
-                          // Fallback to N/A
-                          return <span className="text-sm text-muted-foreground">N/A</span>;
-                        })()}
-                      </TableCell>
-                      <TableCell className="font-mono text-xs">
-                        {log.record_id || 'N/A'}
-                      </TableCell>
-                      <TableCell>
-                        <AuditDetailsCell details={log.details} />
-                      </TableCell>
-                    </TableRow>
-                  ))}
+                            ) : (
+                              <span className="text-xs text-muted-foreground">—</span>
+                            )}
+                          </TableCell>
+                          <TableCell>
+                            {hasTableInfo ? (
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <Badge variant="secondary" className="font-mono text-xs cursor-help">
+                                    {log.table_name}
+                                  </Badge>
+                                </TooltipTrigger>
+                                {hasRowCount && (
+                                  <TooltipContent>
+                                    <p className="text-sm">
+                                      <span className="font-semibold">Rows:</span>{' '}
+                                      {log.row_count!.toLocaleString()}
+                                    </p>
+                                  </TooltipContent>
+                                )}
+                              </Tooltip>
+                            ) : (
+                              <span className="text-xs text-muted-foreground">—</span>
+                            )}
+                          </TableCell>
+                          <TableCell className="font-mono text-xs">
+                            {log.record_id ? (
+                              <span className="text-xs">{log.record_id}</span>
+                            ) : (
+                              <span className="text-xs text-muted-foreground">—</span>
+                            )}
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })}
+                  </TooltipProvider>
                 </TableBody>
               </Table>
             </div>

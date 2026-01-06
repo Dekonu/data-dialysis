@@ -20,6 +20,8 @@ class AuditLogEntry(BaseModel):
     details: Optional[dict[str, Any]] = Field(None, description="Additional event details (JSON)")
     source_adapter: Optional[str] = Field(None, description="Source adapter that generated the event")
     severity: Optional[str] = Field(None, description="Severity level (INFO, WARNING, ERROR, CRITICAL)")
+    table_name: Optional[str] = Field(None, description="Name of the table affected (for persistence events)")
+    row_count: Optional[int] = Field(None, description="Number of rows processed (None for singular records, integer for bulk)")
 
 
 class PaginationMeta(BaseModel):

@@ -574,7 +574,9 @@ class StoragePort(ABC):
         event_type: str,
         record_id: Optional[str],
         transformation_hash: Optional[str],
-        details: Optional[dict] = None
+        details: Optional[dict] = None,
+        table_name: Optional[str] = None,
+        row_count: Optional[int] = None
     ) -> Result[str]:
         """Log an audit trail event for compliance and observability.
         
@@ -582,10 +584,12 @@ class StoragePort(ABC):
         redaction, or persistence operation. Required for HIPAA/GDPR compliance.
         
         Parameters:
-            event_type: Type of event (e.g., 'REDACTION', 'SCHEMA_COERCION', 'PERSISTENCE')
+            event_type: Type of event (e.g., 'REDACTION', 'SCHEMA_COERCION', 'PERSISTENCE', 'BULK_PERSISTENCE')
             record_id: Unique identifier of the affected record (if applicable)
             transformation_hash: Hash of original data for traceability
             details: Additional event metadata (source, adapter, field_changes, etc.)
+            table_name: Name of the table affected (for persistence events)
+            row_count: Number of rows processed (None/NULL for singular records, integer for bulk operations)
         
         Returns:
             Result[str]: Result object containing either:

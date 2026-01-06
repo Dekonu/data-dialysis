@@ -102,6 +102,8 @@ export interface AuditLogEntry {
   details?: Record<string, unknown> | null;
   source_adapter?: string | null;
   severity?: string | null;
+  table_name?: string | null;
+  row_count?: number | null;
 }
 
 export interface PaginationMeta {

@@ -134,7 +134,8 @@ class AuditService:
             if result:
                 columns = [
                     "audit_id", "event_type", "event_timestamp", "record_id",
-                    "transformation_hash", "details", "source_adapter", "severity"
+                    "transformation_hash", "details", "source_adapter", "severity",
+                    "table_name", "row_count"
                 ]
                 
                 for row in result:
@@ -153,6 +154,14 @@ class AuditService:
                         except (json.JSONDecodeError, TypeError):
                             details = None
                     
+                    # Handle row_count conversion (may be None or integer)
+                    row_count = row_dict.get("row_count")
+                    if row_count is not None:
+                        try:
+                            row_count = int(row_count)
+                        except (ValueError, TypeError):
+                            row_count = None
+                    
                     logs.append(AuditLogEntry(
                         audit_id=row_dict.get("audit_id", ""),
                         event_type=row_dict.get("event_type", ""),
@@ -161,7 +170,9 @@ class AuditService:
                         transformation_hash=row_dict.get("transformation_hash"),
                         details=details,
                         source_adapter=row_dict.get("source_adapter"),
-                        severity=row_dict.get("severity")
+                        severity=row_dict.get("severity"),
+                        table_name=row_dict.get("table_name"),
+                        row_count=row_count
                     ))
             
             # Build pagination metadata

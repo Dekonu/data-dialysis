@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { cn } from '@/lib/utils';
-import { LayoutDashboard, FileText, AlertCircle, Shield, Gauge } from 'lucide-react';
+import { LayoutDashboard, FileText, AlertCircle, Shield, Gauge, Lock } from 'lucide-react';
 import { ThemeToggle } from '@/components/theme-toggle';
 
 const navigation = [
@@ -26,6 +26,11 @@ const navigation = [
     name: 'Audit Logs',
     href: '/audit',
     icon: FileText,
+  },
+  {
+    name: 'Redactions',
+    href: '/redactions',
+    icon: Lock,
   },
   {
     name: 'Circuit Breaker',

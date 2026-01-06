@@ -409,9 +409,19 @@ class PostgreSQLAdapter(StoragePort):
                     transformation_hash VARCHAR(64),
                     details JSONB,
                     source_adapter VARCHAR(50),
-                    severity VARCHAR(20)
+                    severity VARCHAR(20),
+                    table_name VARCHAR(50),
+                    row_count INTEGER
                 )
                 """)
+                
+                # Add columns if they don't exist (for existing databases)
+                try:
+                    cursor.execute("ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS table_name VARCHAR(50)")
+                    cursor.execute("ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS row_count INTEGER")
+                except Exception:
+                    # Columns may already exist, ignore error
+                    pass
                 
                 # Create redaction logs table for detailed PII redaction tracking
                 cursor.execute("""
@@ -690,7 +700,7 @@ class PostgreSQLAdapter(StoragePort):
             conn.commit()
             cursor.close()
             
-            # Log audit event
+            # Log audit event (singular record - row_count is None)
             self.log_audit_event(
                 event_type="PERSISTENCE",
                 record_id=patient.patient_id,
@@ -699,7 +709,9 @@ class PostgreSQLAdapter(StoragePort):
                     "source_adapter": record.source_adapter,
                     "encounter_count": len(record.encounters),
                     "observation_count": len(record.observations),
-                }
+                },
+                table_name="patients",  # Main table for GoldenRecord
+                row_count=None  # Singular record, not bulk
             )
             
             logger.info(f"Persisted GoldenRecord for patient_id: {patient.patient_id}")
@@ -756,6 +768,31 @@ class PostgreSQLAdapter(StoragePort):
             cursor.close()
             
             logger.info(f"Persisted batch of {len(records)} records")
+            
+            # Log bulk persistence audit event
+            # Extract source_adapter from first record if available
+            source_adapter = 'batch_ingestion'
+            if records and records[0].source_adapter:
+                source_adapter = records[0].source_adapter
+            
+            # Count total rows across all tables (patients + encounters + observations)
+            total_rows = len(records)  # Each record has 1 patient
+            for record in records:
+                total_rows += len(record.encounters) + len(record.observations)
+            
+            # Log bulk audit event
+            self.log_audit_event(
+                event_type="BULK_PERSISTENCE",
+                record_id=None,
+                transformation_hash=None,
+                details={
+                    "source_adapter": source_adapter,
+                    "record_count": len(records),
+                },
+                table_name="patients",  # Primary table, but includes encounters/observations
+                row_count=total_rows
+            )
+            
             return Result.success_result(record_ids)
             
         except Exception as e:
@@ -1178,16 +1215,16 @@ class PostgreSQLAdapter(StoragePort):
                 if len(source_adapter_series) > 0:
                     source_adapter = str(source_adapter_series.iloc[0])
             
-            # Log audit event
+            # Log audit event (bulk operation)
             self.log_audit_event(
                 event_type="BULK_PERSISTENCE",
                 record_id=None,
                 transformation_hash=None,
                 details={
-                    "table_name": table_name,
-                    "row_count": total_rows,
                     "source_adapter": source_adapter,
-                }
+                },
+                table_name=table_name,
+                row_count=total_rows
             )
             
             return Result.success_result(total_rows)
@@ -1208,7 +1245,9 @@ class PostgreSQLAdapter(StoragePort):
         event_type: str,
         record_id: Optional[str],
         transformation_hash: Optional[str],
-        details: Optional[dict] = None
+        details: Optional[dict] = None,
+        table_name: Optional[str] = None,
+        row_count: Optional[int] = None
     ) -> Result[str]:
         """Log an audit trail event for compliance and observability.
         
@@ -1245,8 +1284,9 @@ class PostgreSQLAdapter(StoragePort):
             cursor.execute("""
                 INSERT INTO audit_log (
                     audit_id, event_type, event_timestamp, record_id,
-                    transformation_hash, details, source_adapter, severity
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    transformation_hash, details, source_adapter, severity,
+                    table_name, row_count
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """, [
                 audit_id,
                 event_type,
@@ -1256,6 +1296,8 @@ class PostgreSQLAdapter(StoragePort):
                 details_json,
                 details.get('source_adapter') if details else None,
                 severity,
+                table_name,
+                row_count,
             ])
             
             conn.commit()
@@ -1271,6 +1313,68 @@ class PostgreSQLAdapter(StoragePort):
             logger.error(error_msg, exc_info=True)
             return Result.failure_result(
                 StorageError(error_msg, operation="log_audit_event"),
+                error_type="StorageError"
+            )
+        finally:
+            if conn:
+                self._return_connection(conn)
+    
+    def flush_redaction_logs(self, redaction_logs: list[dict]) -> Result[int]:
+        """Flush multiple redaction logs to the database in a single transaction.
+        
+        Parameters:
+            redaction_logs: List of redaction log dictionaries
+            
+        Returns:
+            Result[int]: Number of logs persisted or error
+        """
+        if not redaction_logs:
+            return Result.success_result(0)
+        
+        conn = None
+        try:
+            if not self._initialized:
+                init_result = self.initialize_schema()
+                if not init_result.is_success():
+                    return init_result
+            
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            
+            # Bulk insert redaction logs
+            for log_entry in redaction_logs:
+                cursor.execute("""
+                    INSERT INTO logs (
+                        log_id, field_name, original_hash, timestamp, rule_triggered,
+                        record_id, source_adapter, ingestion_id, redacted_value, original_value_length
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """, [
+                    log_entry.get('log_id', str(uuid.uuid4())),
+                    log_entry.get('field_name'),
+                    log_entry.get('original_hash'),
+                    log_entry.get('timestamp', datetime.now()),
+                    log_entry.get('rule_triggered'),
+                    log_entry.get('record_id'),
+                    log_entry.get('source_adapter'),
+                    log_entry.get('ingestion_id'),
+                    log_entry.get('redacted_value'),
+                    log_entry.get('original_value_length'),
+                ])
+            
+            conn.commit()
+            cursor.close()
+            
+            count = len(redaction_logs)
+            logger.info(f"Flushed {count} redaction logs to database")
+            return Result.success_result(count)
+            
+        except Exception as e:
+            if conn:
+                conn.rollback()
+            error_msg = f"Failed to flush redaction logs: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            return Result.failure_result(
+                StorageError(error_msg, operation="flush_redaction_logs"),
                 error_type="StorageError"
             )
         finally:

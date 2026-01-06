@@ -270,7 +270,9 @@ class DuckDBAdapter(StoragePort):
                     transformation_hash VARCHAR,
                     details JSON,
                     source_adapter VARCHAR,
-                    severity VARCHAR
+                    severity VARCHAR,
+                    table_name VARCHAR,
+                    row_count INTEGER
                 )
             """)
             
@@ -479,7 +481,7 @@ class DuckDBAdapter(StoragePort):
                 # Commit transaction
                 conn.commit()
                 
-                # Log audit event
+                # Log audit event (singular record - row_count is None)
                 self.log_audit_event(
                     event_type="PERSISTENCE",
                     record_id=patient.patient_id,
@@ -488,7 +490,9 @@ class DuckDBAdapter(StoragePort):
                         "source_adapter": record.source_adapter,
                         "encounter_count": len(record.encounters),
                         "observation_count": len(record.observations),
-                    }
+                    },
+                    table_name="patients",  # Main table for GoldenRecord
+                    row_count=None  # Singular record, not bulk
                 )
                 
                 logger.info(f"Persisted GoldenRecord for patient_id: {patient.patient_id}")
@@ -542,6 +546,31 @@ class DuckDBAdapter(StoragePort):
                 
                 conn.commit()
                 logger.info(f"Persisted batch of {len(records)} records")
+                
+                # Log bulk persistence audit event
+                # Extract source_adapter from first record if available
+                source_adapter = 'batch_ingestion'
+                if records and records[0].source_adapter:
+                    source_adapter = records[0].source_adapter
+                
+                # Count total rows across all tables (patients + encounters + observations)
+                total_rows = len(records)  # Each record has 1 patient
+                for record in records:
+                    total_rows += len(record.encounters) + len(record.observations)
+                
+                # Log bulk audit event
+                self.log_audit_event(
+                    event_type="BULK_PERSISTENCE",
+                    record_id=None,
+                    transformation_hash=None,
+                    details={
+                        "source_adapter": source_adapter,
+                        "record_count": len(records),
+                    },
+                    table_name="patients",  # Primary table, but includes encounters/observations
+                    row_count=total_rows
+                )
+                
                 return Result.success_result(record_ids)
                 
             except Exception as e:
@@ -655,7 +684,9 @@ class DuckDBAdapter(StoragePort):
         event_type: str,
         record_id: Optional[str],
         transformation_hash: Optional[str],
-        details: Optional[dict] = None
+        details: Optional[dict] = None,
+        table_name: Optional[str] = None,
+        row_count: Optional[int] = None
     ) -> Result[str]:
         """Log an audit trail event for compliance and observability.
         
@@ -689,8 +720,9 @@ class DuckDBAdapter(StoragePort):
             conn.execute("""
                 INSERT INTO audit_log (
                     audit_id, event_type, event_timestamp, record_id,
-                    transformation_hash, details, source_adapter, severity
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    transformation_hash, details, source_adapter, severity,
+                    table_name, row_count
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, [
                 audit_id,
                 event_type,
@@ -700,6 +732,8 @@ class DuckDBAdapter(StoragePort):
                 details_json,
                 details.get('source_adapter') if details else None,
                 severity,
+                table_name,
+                row_count,
             ])
             
             logger.debug(f"Logged audit event: {event_type} (ID: {audit_id})")

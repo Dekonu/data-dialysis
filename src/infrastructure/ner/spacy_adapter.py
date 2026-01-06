@@ -102,8 +102,12 @@ class SpaCyNERAdapter(NERPort):
         try:
             # Try loading with minimal pipeline components to avoid Pydantic issues
             # This reduces dependencies and can help with compatibility
+            # We only need NER for person name extraction, so disable:
+            # - parser: not needed for NER
+            # - tagger: not needed for NER (POS tagging)
+            # - lemmatizer: not needed for NER (requires POS tags, causes warnings)
             try:
-                self._nlp = spacy.load(model_name, disable=["parser", "tagger"])
+                self._nlp = spacy.load(model_name, disable=["parser", "tagger", "lemmatizer"])
             except (TypeError, ValueError):
                 # If disable doesn't work, try standard load
                 self._nlp = spacy.load(model_name)
