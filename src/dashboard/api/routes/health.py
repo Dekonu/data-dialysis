@@ -2,7 +2,7 @@
 
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException
 
@@ -42,6 +42,14 @@ async def check_database_health(storage: StoragePort) -> DatabaseHealth:
                     status="connected",
                     type=db_type,
                     response_time_ms=round(response_time, 2)
+                )
+            else:
+                # Query failed - database is disconnected
+                logger.warning(f"Database query failed: {result.error}")
+                return DatabaseHealth(
+                    status="disconnected",
+                    type=db_type,
+                    response_time_ms=None
                 )
         
         # Fallback: just check if storage is initialized
@@ -98,7 +106,7 @@ async def health_check(storage: StorageDep) -> HealthResponse:
         
         return HealthResponse(
             status=overall_status,
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
             version="1.0.0",
             database=db_health
         )

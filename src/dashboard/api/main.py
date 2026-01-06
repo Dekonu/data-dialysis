@@ -5,6 +5,7 @@ and configuration for the dashboard API.
 """
 
 import logging
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -24,6 +25,18 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan context manager for startup and shutdown events."""
+    # Startup
+    logger.info("Data-Dialysis Dashboard API starting up...")
+    logger.info("API documentation available at /api/docs")
+    yield
+    # Shutdown
+    logger.info("Data-Dialysis Dashboard API shutting down...")
+
+
 # Create FastAPI application
 app = FastAPI(
     title="Data-Dialysis Dashboard API",
@@ -31,7 +44,8 @@ app = FastAPI(
     version="1.0.0",
     docs_url="/api/docs",
     redoc_url="/api/redoc",
-    openapi_url="/api/openapi.json"
+    openapi_url="/api/openapi.json",
+    lifespan=lifespan
 )
 
 # CORS configuration
@@ -61,19 +75,6 @@ app.include_router(circuit_breaker.router)
 app.include_router(websocket.router)
 
 
-@app.on_event("startup")
-async def startup_event():
-    """Startup event handler."""
-    logger.info("Data-Dialysis Dashboard API starting up...")
-    logger.info("API documentation available at /api/docs")
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Shutdown event handler."""
-    logger.info("Data-Dialysis Dashboard API shutting down...")
-
-
 @app.get("/")
 async def root():
     """Root endpoint."""
@@ -94,4 +95,3 @@ if __name__ == "__main__":
         reload=True,
         log_level="info"
     )
-
