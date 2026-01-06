@@ -643,3 +643,74 @@ class StorageError(IngestionError):
         super().__init__(message)
         self.operation = operation
         self.details = details or {}
+
+
+# ============================================================================
+# NER Ports
+# ============================================================================
+
+class NERPort(ABC):
+    """Port interface for Named Entity Recognition.
+    
+    This port defines how the Domain Core wants to extract person names from
+    unstructured text, following Hexagonal Architecture principles. The domain
+    defines the interface, and infrastructure adapters (SpaCy, etc.) provide
+    the implementation.
+    
+    Security Impact:
+        - Enables accurate PII detection in unstructured clinical notes
+        - Allows swapping NER implementations without changing domain logic
+        - Supports graceful fallback to regex if NER unavailable
+    
+    Example Usage:
+        ```python
+        class SpaCyNERAdapter(NERPort):
+            def extract_person_names(self, text: str) -> List[Tuple[str, int, int]]:
+                # Use SpaCy to extract names
+                ...
+        
+        adapter = SpaCyNERAdapter()
+        names = adapter.extract_person_names("Patient John Smith visited.")
+        # Returns: [("John Smith", 8, 18)]
+        ```
+    """
+    
+    @abstractmethod
+    def extract_person_names(self, text: str) -> list[tuple[str, int, int]]:
+        """Extract person names from unstructured text.
+        
+        Parameters:
+            text: Input text to analyze (e.g., clinical notes, narrative text)
+        
+        Returns:
+            List of (name, start_pos, end_pos) tuples where:
+                - name: The extracted person name string
+                - start_pos: Character position where name starts in text
+                - end_pos: Character position where name ends in text
+            Returns empty list if no names found or if NER is unavailable.
+        
+        Security Impact:
+            - Identifies person names that may be PII in unstructured text
+            - Position information enables precise redaction
+            - Should handle errors gracefully (return empty list on failure)
+        
+        Example:
+            ```python
+            names = adapter.extract_person_names("Patient John Smith visited Dr. Jane Doe.")
+            # Returns: [("John Smith", 8, 18), ("Jane Doe", 30, 38)]
+            ```
+        """
+        pass
+    
+    @abstractmethod
+    def is_available(self) -> bool:
+        """Check if NER service is available and ready to use.
+        
+        Returns:
+            True if NER can be used, False otherwise (e.g., model not loaded)
+        
+        Security Impact:
+            - Allows graceful fallback to regex-based redaction
+            - Prevents errors when NER model is unavailable
+        """
+        pass

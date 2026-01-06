@@ -71,6 +71,10 @@ class Settings:
         self.xml_streaming_threshold = int(os.getenv("DD_XML_STREAMING_THRESHOLD", str(100 * 1024 * 1024)))  # 100MB
         self.xml_max_events = int(os.getenv("DD_XML_MAX_EVENTS", "1000000"))
         self.xml_max_depth = int(os.getenv("DD_XML_MAX_DEPTH", "100"))
+        
+        # NER (Named Entity Recognition) settings
+        self.ner_enabled = os.getenv("DD_NER_ENABLED", "true").lower() == "true"
+        self.spacy_model = os.getenv("DD_SPACY_MODEL", "en_core_web_sm")
     
     @property
     def db_config(self) -> DatabaseConfig:

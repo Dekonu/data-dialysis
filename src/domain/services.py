@@ -8,6 +8,7 @@ data models.
 Security Impact:
     - Prevents PII from being persisted in unredacted form
     - Uses regex patterns to identify structured PII (SSN, phone, email)
+    - Uses NLP-based NER for person names in unstructured text (when available)
     - Handles unstructured text redaction for clinical notes
     - All redaction methods are pure functions (no side effects)
 
@@ -15,12 +16,19 @@ Architecture:
     - Pure domain service with zero infrastructure dependencies
     - Stateless service that can be used across the application
     - Follows Hexagonal Architecture: Core security logic isolated from infrastructure
+    - Uses NER adapter via port interface (dependency injection)
 """
 
+import logging
 import re
 from datetime import date, datetime
-from typing import Optional, Union
+from typing import Optional, Union, TYPE_CHECKING
 import pandas as pd
+
+if TYPE_CHECKING:
+    from src.domain.ports import NERPort
+
+logger = logging.getLogger(__name__)
 
 
 class RedactorService:
@@ -33,11 +41,19 @@ class RedactorService:
     - Names (first and last)
     - Addresses
     - Dates of birth
-    - Unstructured text containing PII
+    - Unstructured text containing PII (uses NER when available)
     
     All methods are pure functions that take input and return redacted output
     without side effects.
+    
+    NER Integration:
+        - Uses NER adapter (via NERPort) for person name detection in unstructured text
+        - Falls back to regex if NER unavailable
+        - NER adapter can be injected via set_ner_adapter() for testing
     """
+    
+    # Class variable for NER adapter (lazy-loaded, dependency injection)
+    _ner_adapter: Optional['NERPort'] = None
     
     # Regex patterns for PII detection
     SSN_PATTERN = re.compile(r'\b\d{3}-?\d{2}-?\d{4}\b')
@@ -59,6 +75,65 @@ class RedactorService:
     NAME_MASK = "[REDACTED]"
     ADDRESS_MASK = "[REDACTED]"
     DATE_MASK = "****-**-**"
+    
+    @classmethod
+    def set_ner_adapter(cls, adapter: Optional['NERPort']) -> None:
+        """Set NER adapter for name extraction.
+        
+        This allows dependency injection of NER implementation.
+        Follows Hexagonal Architecture pattern.
+        
+        Parameters:
+            adapter: NER adapter instance (implements NERPort) or None to disable
+        
+        Security Impact:
+            - Enables testing with mock NER adapters
+            - Allows swapping NER implementations without changing domain logic
+        """
+        cls._ner_adapter = adapter
+    
+    @classmethod
+    def _get_ner_adapter(cls) -> Optional['NERPort']:
+        """Get NER adapter (lazy initialization).
+        
+        Returns:
+            NER adapter if available, None otherwise
+        
+        Security Impact:
+            - Lazy loading prevents unnecessary model loading
+            - Graceful fallback to regex if NER unavailable
+        """
+        if cls._ner_adapter is None:
+            # Try to initialize default SpaCy adapter
+            try:
+                from src.infrastructure.ner.spacy_adapter import SpaCyNERAdapter
+                # Get model name from settings (if available)
+                try:
+                    from src.infrastructure.settings import settings
+                    model_name = getattr(settings, 'spacy_model', 'en_core_web_sm')
+                except (ImportError, AttributeError):
+                    model_name = 'en_core_web_sm'
+                
+                # Check if NER is enabled
+                try:
+                    from src.infrastructure.settings import settings
+                    ner_enabled = getattr(settings, 'ner_enabled', True)
+                except (ImportError, AttributeError):
+                    ner_enabled = True
+                
+                if ner_enabled:
+                    cls._ner_adapter = SpaCyNERAdapter(model_name=model_name)
+                else:
+                    cls._ner_adapter = None
+                    logger.debug("NER is disabled via settings")
+            except ImportError:
+                logger.debug("SpaCy not available, using regex-only redaction")
+                cls._ner_adapter = None
+            except Exception as e:
+                logger.warning(f"Failed to initialize NER adapter: {e}")
+                cls._ner_adapter = None
+        
+        return cls._ner_adapter
     
     @staticmethod
     def redact_ssn(value: Union[Optional[str], 'pd.Series']) -> Union[Optional[str], 'pd.Series']:
@@ -337,8 +412,9 @@ class RedactorService:
         """Redact PII from unstructured text (e.g., clinical notes).
         
         Security Impact: Scans unstructured text for PII patterns and redacts them.
-        This is a basic regex-based implementation. For production, consider
-        NLP-based Named Entity Recognition (NER) for better accuracy.
+        Uses NLP-based Named Entity Recognition (NER) for person names when available,
+        falls back to regex if NER unavailable. Always uses regex for structured PII
+        (SSN, phone, email).
         Supports both scalar values (backward compatible) and pandas Series (vectorized).
         
         Parameters:
@@ -351,15 +427,24 @@ class RedactorService:
         if isinstance(value, pd.Series):
             result = value.astype(str).copy()
             result = result.replace('nan', '')
-            # Redact SSNs
+            # Redact SSNs (always use regex - fast and accurate)
             result = result.str.replace(RedactorService.SSN_PATTERN.pattern, RedactorService.SSN_MASK, regex=True)
-            # Redact phone numbers
+            # Redact phone numbers (always use regex)
             result = result.str.replace(RedactorService.PHONE_PATTERN.pattern, RedactorService.PHONE_MASK, regex=True)
-            # Redact email addresses
+            # Redact email addresses (always use regex)
             result = result.str.replace(RedactorService.EMAIL_PATTERN.pattern, RedactorService.EMAIL_MASK, regex=True)
-            # Note: Name redaction in unstructured text is complex and would benefit
-            # from NLP/NER. This basic implementation may miss names or over-redact.
-            # For production, integrate with SpaCy or similar NER library.
+            
+            # Use NER for person names (if available)
+            ner_adapter = RedactorService._get_ner_adapter()
+            if ner_adapter and ner_adapter.is_available():
+                # Apply NER-based name redaction to each text
+                def redact_with_ner(text: str) -> str:
+                    if not text or text == 'nan':
+                        return text
+                    return RedactorService._redact_names_with_ner(text, ner_adapter)
+                
+                result = result.apply(redact_with_ner)
+            
             result[value.isna()] = None
             return result
         
@@ -369,20 +454,49 @@ class RedactorService:
         
         text = str(value)
         
-        # Redact SSNs
+        # Redact SSNs (always use regex - fast and accurate)
         text = RedactorService.SSN_PATTERN.sub(RedactorService.SSN_MASK, text)
         
-        # Redact phone numbers
+        # Redact phone numbers (always use regex)
         text = RedactorService.PHONE_PATTERN.sub(RedactorService.PHONE_MASK, text)
         
-        # Redact email addresses
+        # Redact email addresses (always use regex)
         text = RedactorService.EMAIL_PATTERN.sub(RedactorService.EMAIL_MASK, text)
         
-        # Note: Name redaction in unstructured text is complex and would benefit
-        # from NLP/NER. This basic implementation may miss names or over-redact.
-        # For production, integrate with SpaCy or similar NER library.
+        # Use NER for person names (if available)
+        ner_adapter = RedactorService._get_ner_adapter()
+        if ner_adapter and ner_adapter.is_available():
+            text = RedactorService._redact_names_with_ner(text, ner_adapter)
         
         return text
+    
+    @staticmethod
+    def _redact_names_with_ner(text: str, ner_adapter: 'NERPort') -> str:
+        """Redact person names using NER adapter.
+        
+        Parameters:
+            text: Text to redact
+            ner_adapter: NER adapter instance
+        
+        Returns:
+            Text with person names redacted
+        
+        Security Impact:
+            - Uses NLP to identify person names more accurately than regex
+            - Redacts names in-place, preserving text structure
+            - Handles errors gracefully (returns original text on failure)
+        """
+        try:
+            person_names = ner_adapter.extract_person_names(text)
+            
+            # Redact names in reverse order (to preserve character positions)
+            for name, start, end in reversed(person_names):
+                text = text[:start] + RedactorService.NAME_MASK + text[end:]
+            
+            return text
+        except Exception as e:
+            logger.warning(f"Error redacting names with NER: {e}, using original text")
+            return text
     
     @staticmethod
     def redact_patient_record(patient_data: dict) -> dict:

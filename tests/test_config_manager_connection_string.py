@@ -223,9 +223,22 @@ class TestEnvironmentVariables:
         
         try:
             # Mock load_dotenv to prevent .env file from overriding our test values
-            # Since load_dotenv is imported inside the try block, we need to patch it at the dotenv module level
+            # Since load_dotenv is imported inside from_environment(), we need to patch it at the dotenv module level
             # This prevents the .env file from being loaded and overriding our test environment variables
-            with patch('dotenv.load_dotenv', side_effect=lambda *args, **kwargs: None), \
+            # Handle case where dotenv might not be installed
+            try:
+                import dotenv
+                # Patch dotenv.load_dotenv where it's actually used
+                dotenv_patch = patch('dotenv.load_dotenv', side_effect=lambda *args, **kwargs: None)
+                use_dotenv_patch = True
+            except ImportError:
+                # If dotenv is not installed, we don't need to patch anything
+                # The import will fail anyway and .env won't be loaded
+                from contextlib import nullcontext
+                dotenv_patch = nullcontext()
+                use_dotenv_patch = False
+            
+            with dotenv_patch, \
                  patch.dict(os.environ, {
                     'DD_DB_TYPE': 'postgresql',
                     'DD_DB_HOST': 'localhost',
