@@ -700,7 +700,6 @@ class PostgresAdapter(StoragePort):
                 table_name="patients",  # Main table for GoldenRecord
                 row_count=None,  # Singular record, not bulk
                 source_adapter=record.source_adapter
-                source_adapter=record.source_adapter
             )
             
             logger.info(f"Persisted GoldenRecord for patient_id: {patient.patient_id}")
