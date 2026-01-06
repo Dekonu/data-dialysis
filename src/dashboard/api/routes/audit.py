@@ -8,6 +8,7 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query, Response
 from fastapi.responses import StreamingResponse
+from typing import Iterator
 
 from src.dashboard.api.dependencies import StorageDep
 from src.dashboard.services.audit_service import AuditService
@@ -192,39 +193,56 @@ async def export_audit_logs(
         import csv
         import io
         
-        output = io.StringIO()
-        writer = csv.writer(output)
-        
-        # Write header
-        writer.writerow([
-            "audit_id", "event_type", "event_timestamp", "record_id",
-            "transformation_hash", "details", "source_adapter", "severity"
-        ])
-        
-        # Write rows
-        for log in response_data.logs:
-            details_str = ""
-            if log.details:
-                import json
-                details_str = json.dumps(log.details)
+        def generate_csv() -> Iterator[str]:
+            """Generator function to stream CSV rows incrementally.
             
+            This avoids loading the entire CSV into memory, making it
+            memory-efficient for large exports.
+            
+            Yields:
+                str: CSV rows as strings (including newlines)
+            """
+            # Create a StringIO buffer for CSV writer
+            buffer = io.StringIO()
+            writer = csv.writer(buffer)
+            
+            # Write header row
             writer.writerow([
-                log.audit_id,
-                log.event_type,
-                log.event_timestamp.isoformat() if log.event_timestamp else "",
-                log.record_id or "",
-                log.transformation_hash or "",
-                details_str,
-                log.source_adapter or "",
-                log.severity or ""
+                "audit_id", "event_type", "event_timestamp", "record_id",
+                "transformation_hash", "details", "source_adapter", "severity"
             ])
-        
-        csv_data = output.getvalue()
-        output.close()
+            yield buffer.getvalue()
+            buffer.seek(0)
+            buffer.truncate(0)
+            
+            # Write data rows incrementally
+            for log in response_data.logs:
+                details_str = ""
+                if log.details:
+                    import json
+                    details_str = json.dumps(log.details)
+                
+                writer.writerow([
+                    log.audit_id,
+                    log.event_type,
+                    log.event_timestamp.isoformat() if log.event_timestamp else "",
+                    log.record_id or "",
+                    log.transformation_hash or "",
+                    details_str,
+                    log.source_adapter or "",
+                    log.severity or ""
+                ])
+                
+                # Yield the row and clear buffer for next iteration
+                yield buffer.getvalue()
+                buffer.seek(0)
+                buffer.truncate(0)
+            
+            buffer.close()
         
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        return Response(
-            content=csv_data,
+        return StreamingResponse(
+            generate_csv(),
             media_type="text/csv",
             headers={
                 "Content-Disposition": f'attachment; filename="audit_logs_{timestamp}.csv"'
