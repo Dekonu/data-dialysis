@@ -1,0 +1,100 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:16-alpine
+    container_name: datadialysis-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-datadialysis}
+      POSTGRES_USER: ${POSTGRES_USER:-datadialysis}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-datadialysis}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-datadialysis}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - datadialysis-network
+
+  # Dashboard API Backend
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: datadialysis-api
+    environment:
+      # Database configuration
+      DB_TYPE: postgresql
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB:-datadialysis}
+      DB_USER: ${POSTGRES_USER:-datadialysis}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-datadialysis}
+      DB_SSL_MODE: prefer
+      
+      # API configuration
+      API_HOST: 0.0.0.0
+      API_PORT: 8000
+      
+      # Logging
+      JSON_LOGS: ${JSON_LOGS:-false}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      
+      # Security
+      RATE_LIMIT_DEFAULT: ${RATE_LIMIT_DEFAULT:-100}
+      RATE_LIMIT_WINDOW: ${RATE_LIMIT_WINDOW:-60}
+      ENABLE_HSTS: ${ENABLE_HSTS:-false}
+      
+      # CORS (adjust for production)
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+    ports:
+      - "${API_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/api/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - datadialysis-network
+    restart: unless-stopped
+
+  # Dashboard Frontend
+  frontend:
+    build:
+      context: ./dashboard-frontend
+      dockerfile: Dockerfile
+    container_name: datadialysis-frontend
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+      NEXT_PUBLIC_WS_URL: ${NEXT_PUBLIC_WS_URL:-ws://localhost:8000}
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    depends_on:
+      - api
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - datadialysis-network
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+    driver: local
+
+networks:
+  datadialysis-network:
+    driver: bridge
+

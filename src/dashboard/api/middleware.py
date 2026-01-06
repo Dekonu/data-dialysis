@@ -1,15 +1,22 @@
 """Middleware configuration for dashboard API.
 
-This module sets up middleware for logging, error handling, and CORS.
+This module sets up middleware for logging, error handling, CORS, and security.
 """
 
 import logging
 import time
+import os
 from typing import Callable
 
 from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 from fastapi.responses import JSONResponse
+
+from src.dashboard.api.security import (
+    RateLimitMiddleware,
+    SecurityHeadersMiddleware,
+    get_rate_limit_config
+)
 
 logger = logging.getLogger(__name__)
 
@@ -111,7 +118,31 @@ def setup_middleware(app) -> None:
     Security Impact:
         - Logs all requests for audit trail
         - Handles errors gracefully without exposing sensitive information
+        - Rate limiting prevents abuse
+        - Security headers protect against common vulnerabilities
+        
+    Middleware Order (important):
+        1. SecurityHeadersMiddleware - Adds security headers
+        2. RateLimitMiddleware - Enforces rate limits
+        3. ErrorHandlingMiddleware - Handles errors
+        4. LoggingMiddleware - Logs requests/responses
     """
-    app.add_middleware(LoggingMiddleware)
+    # Security headers (first, so they're always added)
+    enable_hsts = os.getenv("ENABLE_HSTS", "false").lower() == "true"
+    app.add_middleware(SecurityHeadersMiddleware, enable_hsts=enable_hsts)
+    
+    # Rate limiting (before error handling to catch rate limit errors)
+    rate_limit_config = get_rate_limit_config()
+    app.add_middleware(
+        RateLimitMiddleware,
+        default_limit=int(os.getenv("RATE_LIMIT_DEFAULT", "100")),
+        default_window=int(os.getenv("RATE_LIMIT_WINDOW", "60")),
+        per_endpoint_limits=rate_limit_config
+    )
+    
+    # Error handling (before logging to catch errors)
     app.add_middleware(ErrorHandlingMiddleware)
+    
+    # Logging (last, to log everything including errors)
+    app.add_middleware(LoggingMiddleware)
 

@@ -1,9 +1,6 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  // Optimize production builds
-  swcMinify: true,
-  
   // Enable compression
   compress: true,
   
@@ -16,6 +13,9 @@ const nextConfig: NextConfig = {
   experimental: {
     optimizePackageImports: ['lucide-react', 'recharts'],
   },
+  
+  // Enable standalone output for Docker
+  output: 'standalone',
   
   // Turbopack configuration (Next.js 16+ default)
   turbopack: {

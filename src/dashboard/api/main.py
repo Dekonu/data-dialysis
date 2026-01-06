@@ -5,11 +5,13 @@ and configuration for the dashboard API.
 """
 
 import logging
+import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from src.dashboard.api.middleware import setup_middleware
+from src.dashboard.api.logging_config import setup_logging
 from src.dashboard.api.routes import (
     health,
     metrics,
@@ -18,11 +20,11 @@ from src.dashboard.api.routes import (
     websocket
 )
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+# Configure structured logging
+use_json_logs = os.getenv("JSON_LOGS", "false").lower() == "true"
+log_level = os.getenv("LOG_LEVEL", "INFO")
+setup_logging(use_json=use_json_logs, log_level=log_level)
+
 logger = logging.getLogger(__name__)
 
 
@@ -32,6 +34,8 @@ async def lifespan(app: FastAPI):
     # Startup
     logger.info("Data-Dialysis Dashboard API starting up...")
     logger.info("API documentation available at /api/docs")
+    logger.info(f"Logging level: {os.getenv('LOG_LEVEL', 'INFO')}")
+    logger.info(f"JSON logs: {os.getenv('JSON_LOGS', 'false')}")
     yield
     # Shutdown
     logger.info("Data-Dialysis Dashboard API shutting down...")
