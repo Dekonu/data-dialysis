@@ -18,4 +18,15 @@ from src.dashboard.models.audit import (
     RedactionLogsResponse
 )
 from src.dashboard.models.circuit_breaker import CircuitBreakerStatus
+from src.dashboard.models.websocket import (
+    WebSocketMessage,
+    ConnectionMessage,
+    HeartbeatMessage,
+    MetricsUpdateMessage,
+    SecurityMetricsUpdateMessage,
+    PerformanceMetricsUpdateMessage,
+    CircuitBreakerUpdateMessage,
+    ErrorMessage,
+    WebSocketMessageType,
+)
 
