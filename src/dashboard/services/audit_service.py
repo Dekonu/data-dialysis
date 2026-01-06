@@ -90,16 +90,13 @@ class AuditService:
                 params.append(source_adapter)
             
             # Validate sort_by to prevent SQL injection
-            # Use a mapping to ensure we only use predefined, safe column names
+            # Use a set to ensure we only use predefined, safe column names
             allowed_sort_fields = {
-                "event_timestamp": "event_timestamp",
-                "event_type": "event_type",
-                "severity": "severity",
-                "source_adapter": "source_adapter",
-                "record_id": "record_id"
+                "event_timestamp", "event_type", "severity", 
+                "source_adapter", "record_id"
             }
-            # Get the safe column name from mapping, default to event_timestamp
-            safe_sort_by = allowed_sort_fields.get(sort_by, "event_timestamp")
+            # Only use the sort_by value if it's in the allowed set, otherwise use default
+            safe_sort_by = sort_by if sort_by in allowed_sort_fields else "event_timestamp"
             
             # Validate sort_order
             sort_order = sort_order.upper()
@@ -251,16 +248,13 @@ class AuditService:
                 params.append(ingestion_id)
             
             # Validate sort_by
-            # Use a mapping to ensure we only use predefined, safe column names
+            # Use a set to ensure we only use predefined, safe column names
             allowed_sort_fields = {
-                "timestamp": "timestamp",
-                "field_name": "field_name",
-                "rule_triggered": "rule_triggered",
-                "source_adapter": "source_adapter",
-                "record_id": "record_id"
+                "timestamp", "field_name", "rule_triggered",
+                "source_adapter", "record_id"
             }
-            # Get the safe column name from mapping, default to timestamp
-            safe_sort_by = allowed_sort_fields.get(sort_by, "timestamp")
+            # Only use the sort_by value if it's in the allowed set, otherwise use default
+            safe_sort_by = sort_by if sort_by in allowed_sort_fields else "timestamp"
             
             # Validate sort_order
             sort_order = sort_order.upper()
