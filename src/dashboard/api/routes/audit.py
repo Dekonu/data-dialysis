@@ -3,12 +3,14 @@
 This module provides endpoints for querying audit logs and redaction logs.
 """
 
+import csv
+import io
+import json
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Iterator, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Response
 from fastapi.responses import StreamingResponse
-from typing import Iterator
 
 from src.dashboard.api.dependencies import StorageDep
 from src.dashboard.services.audit_service import AuditService
@@ -166,8 +168,6 @@ async def export_audit_logs(
     response_data = result.value
     
     if format == "json":
-        import json
-        
         # Convert datetime objects to ISO strings for JSON serialization
         def serialize_datetime(obj):
             if isinstance(obj, datetime):
@@ -190,9 +190,6 @@ async def export_audit_logs(
         )
     
     elif format == "csv":
-        import csv
-        import io
-        
         def generate_csv() -> Iterator[str]:
             """Generator function to stream CSV rows incrementally.
             
@@ -219,7 +216,6 @@ async def export_audit_logs(
             for log in response_data.logs:
                 details_str = ""
                 if log.details:
-                    import json
                     details_str = json.dumps(log.details)
                 
                 writer.writerow([
