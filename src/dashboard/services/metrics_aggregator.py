@@ -300,7 +300,10 @@ class MetricsAggregator:
         start_time: datetime,
         end_time: datetime
     ) -> IngestionMetrics:
-        """Get ingestion metrics from unique ingestion IDs.
+        """Get ingestion metrics from BULK_PERSISTENCE events.
+        
+        Each BULK_PERSISTENCE event represents a batch/ingestion run.
+        This gives us the actual number of ingestion operations, not just unique ingestion IDs.
         
         Parameters:
             start_time: Start time
@@ -317,22 +320,30 @@ class MetricsAggregator:
                 if conn is None:
                     return IngestionMetrics(total=0, successful=0, failed=0, success_rate=0.0)
                 
-                # Count unique ingestion IDs from logs table
+                # Count BULK_PERSISTENCE events from audit log
+                # Each event represents a batch/ingestion operation
                 query = """
-                    SELECT COUNT(DISTINCT ingestion_id) as count
-                    FROM logs
-                    WHERE timestamp >= ? AND timestamp <= ?
-                    AND ingestion_id IS NOT NULL
+                    SELECT COUNT(*) as count
+                    FROM audit_log
+                    WHERE event_type = 'BULK_PERSISTENCE'
+                    AND event_timestamp >= ? AND event_timestamp <= ?
                 """
                 result = conn.execute(query, [start_time, end_time]).fetchone()
                 total = result[0] if result and result[0] else 0
                 
-                # For now, assume all ingestions with logs are successful
-                # Failed ingestions might not have logs
-                successful = total
-                failed = 0
+                # Count failed ingestions from audit log (events with ERROR/CRITICAL severity)
+                failed_query = """
+                    SELECT COUNT(*) as count
+                    FROM audit_log
+                    WHERE event_type = 'BULK_PERSISTENCE'
+                    AND severity IN ('ERROR', 'CRITICAL')
+                    AND event_timestamp >= ? AND event_timestamp <= ?
+                """
+                failed_result = conn.execute(failed_query, [start_time, end_time]).fetchone()
+                failed = failed_result[0] if failed_result and failed_result[0] else 0
                 
-                success_rate = 1.0 if total > 0 else 0.0
+                successful = total - failed
+                success_rate = (successful / total * 100.0) if total > 0 else 0.0
                 
                 return IngestionMetrics(
                     total=total,

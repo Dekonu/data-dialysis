@@ -96,7 +96,10 @@ class PerformanceMetricsService:
         start_time: datetime,
         end_time: datetime
     ) -> ThroughputMetrics:
-        """Get throughput metrics.
+        """Get throughput metrics based on actual processing time from audit logs.
+        
+        Uses BULK_PERSISTENCE events from audit_log to calculate actual processing time,
+        which is more accurate than using ingestion_timestamp from data tables.
         
         Parameters:
             start_time: Start time
@@ -113,47 +116,50 @@ class PerformanceMetricsService:
                 if conn is None:
                     return ThroughputMetrics(records_per_second=0.0)
                 
-                # Count total records processed and get actual time span
+                # Get BULK_PERSISTENCE events with their timestamps and row counts
+                # This gives us actual processing events and their timing
+                query = """
+                    SELECT 
+                        event_timestamp,
+                        row_count,
+                        details
+                    FROM audit_log
+                    WHERE event_type = 'BULK_PERSISTENCE'
+                    AND event_timestamp >= ? AND event_timestamp <= ?
+                    ORDER BY event_timestamp ASC
+                """
+                results = conn.execute(query, [start_time, end_time]).fetchall()
+                
+                if not results:
+                    return ThroughputMetrics(records_per_second=0.0)
+                
+                # Calculate total records and time span from audit events
                 total_records = 0
                 min_timestamp = None
                 max_timestamp = None
                 
-                for table in ['patients', 'encounters', 'observations']:
-                    try:
-                        # Count records and get time range
-                        query = f"""
-                            SELECT 
-                                COUNT(*) as count,
-                                MIN(ingestion_timestamp) as min_ts,
-                                MAX(ingestion_timestamp) as max_ts
-                            FROM {table}
-                            WHERE ingestion_timestamp >= ? AND ingestion_timestamp <= ?
-                        """
-                        result = conn.execute(query, [start_time, end_time]).fetchone()
-                        if result:
-                            count = result[0] if result[0] else 0
-                            table_min = result[1] if len(result) > 1 else None
-                            table_max = result[2] if len(result) > 2 else None
-                            
-                            total_records += count
-                            
-                            # Track overall min/max timestamps
-                            if table_min and (min_timestamp is None or table_min < min_timestamp):
-                                min_timestamp = table_min
-                            if table_max and (max_timestamp is None or table_max > max_timestamp):
-                                max_timestamp = table_max
-                    except Exception as e:
-                        logger.debug(f"Could not query {table}: {str(e)}")
-                        continue
+                for row in results:
+                    if isinstance(row, (list, tuple)):
+                        event_time = row[0]
+                        row_count = row[1] if len(row) > 1 else 0
+                    else:
+                        event_time = row.get('event_timestamp')
+                        row_count = row.get('row_count', 0)
+                    
+                    if event_time and row_count:
+                        total_records += row_count
+                        
+                        # Track min/max timestamps from actual processing events
+                        if min_timestamp is None or event_time < min_timestamp:
+                            min_timestamp = event_time
+                        if max_timestamp is None or event_time > max_timestamp:
+                            max_timestamp = event_time
                 
-                # Calculate throughput based on actual processing time
-                # If we have records, use the actual time span they were processed
-                # Otherwise, use the full time range (but will result in 0)
+                # Calculate throughput based on actual processing time span
                 if total_records > 0 and min_timestamp and max_timestamp:
-                    # Use actual processing time span
+                    # Use actual time span between first and last batch
                     actual_time_delta = (max_timestamp - min_timestamp).total_seconds()
-                    # Add a minimum of 1 second to avoid division by zero
-                    # If all records were processed at the same time, assume 1 second
+                    # Minimum 1 second to avoid division by zero
                     if actual_time_delta <= 0:
                         actual_time_delta = 1.0
                     records_per_second = total_records / actual_time_delta
@@ -167,8 +173,6 @@ class PerformanceMetricsService:
                 else:
                     records_per_second = 0.0
                 
-                # For now, we don't track file sizes or peak throughput
-                # These would need additional tracking
                 return ThroughputMetrics(
                     records_per_second=round(records_per_second, 2),
                     mb_per_second=None,
@@ -227,40 +231,38 @@ class PerformanceMetricsService:
                 if conn is None:
                     return FileProcessingMetrics(total_files=0)
                 
-                # Count unique ingestion batches by looking at distinct time windows
-                # Group records by hour to identify distinct ingestion runs
-                # This is a proxy for file count since we don't track file names directly
+                # Count BULK_PERSISTENCE events from audit log
+                # Each BULK_PERSISTENCE event represents a batch/ingestion operation
+                # This is more accurate than counting distinct ingestion_id since
+                # multiple batches can share the same ingestion_id
                 total_files = 0
                 
-                # Method 1: Count distinct ingestion_id from redaction logs if available
                 try:
                     query = """
-                        SELECT COUNT(DISTINCT ingestion_id) as count
-                        FROM logs
-                        WHERE timestamp >= ? AND timestamp <= ?
-                        AND ingestion_id IS NOT NULL
+                        SELECT COUNT(*) as count
+                        FROM audit_log
+                        WHERE event_type = 'BULK_PERSISTENCE'
+                        AND event_timestamp >= ? AND event_timestamp <= ?
                     """
                     result = conn.execute(query, [start_time, end_time]).fetchone()
                     if result and result[0]:
                         total_files = result[0]
                 except Exception as e:
-                    logger.debug(f"Could not query logs table for ingestion_id: {str(e)}")
-                
-                # Method 2: If no ingestion_id found, count BULK_PERSISTENCE events from audit log
-                # Each BULK_PERSISTENCE event represents a file/batch processing run
-                if total_files == 0:
+                    logger.debug(f"Could not query audit_log for BULK_PERSISTENCE: {str(e)}")
+                    
+                    # Fallback: Count distinct ingestion_id from redaction logs
                     try:
                         query = """
-                            SELECT COUNT(*) as count
-                            FROM audit_log
-                            WHERE event_type = 'BULK_PERSISTENCE'
-                            AND event_timestamp >= ? AND event_timestamp <= ?
+                            SELECT COUNT(DISTINCT ingestion_id) as count
+                            FROM logs
+                            WHERE timestamp >= ? AND timestamp <= ?
+                            AND ingestion_id IS NOT NULL
                         """
                         result = conn.execute(query, [start_time, end_time]).fetchone()
                         if result and result[0]:
                             total_files = result[0]
-                    except Exception as e:
-                        logger.debug(f"Could not query audit_log for BULK_PERSISTENCE: {str(e)}")
+                    except Exception as e2:
+                        logger.debug(f"Could not query logs table for ingestion_id: {str(e2)}")
                 
                 # File size metrics would need to be tracked separately
                 return FileProcessingMetrics(
