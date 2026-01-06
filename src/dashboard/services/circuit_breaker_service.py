@@ -48,34 +48,19 @@ class CircuitBreakerService:
         try:
             # If we have a circuit breaker instance, use it
             if self._circuit_breaker:
-                config = self._circuit_breaker.config
-                is_open = self._circuit_breaker.is_open()
-                
-                # Calculate failure rate
-                with self._circuit_breaker._lock:
-                    if len(self._circuit_breaker._results) > 0:
-                        failures_in_window = sum(
-                            1 for r in self._circuit_breaker._results if not r
-                        )
-                        failure_rate = (
-                            failures_in_window / len(self._circuit_breaker._results)
-                        ) * 100.0
-                        records_in_window = len(self._circuit_breaker._results)
-                    else:
-                        failure_rate = 0.0
-                        failures_in_window = 0
-                        records_in_window = 0
+                # Use public method to get statistics (proper encapsulation)
+                stats = self._circuit_breaker.get_statistics()
                 
                 return Result.success_result(CircuitBreakerStatus(
-                    is_open=is_open,
-                    failure_rate=failure_rate,
-                    threshold=config.failure_threshold_percent,
-                    total_processed=self._circuit_breaker._total_processed,
-                    total_failures=self._circuit_breaker._total_failures,
-                    window_size=config.window_size,
-                    failures_in_window=failures_in_window,
-                    records_in_window=records_in_window,
-                    min_records_before_check=config.min_records_before_check
+                    is_open=stats['is_open'],
+                    failure_rate=stats['failure_rate'],
+                    threshold=stats['threshold'],
+                    total_processed=stats['total_processed'],
+                    total_failures=stats['total_failures'],
+                    window_size=stats['window_size'],
+                    failures_in_window=stats['failures_in_window'],
+                    records_in_window=stats['records_in_window'],
+                    min_records_before_check=stats['min_records_before_check']
                 ))
             
             # Default status (circuit breaker not available)

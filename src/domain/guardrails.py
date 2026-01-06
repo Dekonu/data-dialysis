@@ -251,10 +251,12 @@ class CircuitBreaker:
                 - is_open: Whether circuit is currently open
                 - total_processed: Total records processed
                 - total_failures: Total failures recorded
-                - window_size: Current window size
+                - window_size: Current window size (from config)
+                - records_in_window: Number of records in current sliding window
                 - failures_in_window: Failures in current window
                 - failure_rate: Current failure rate percentage
                 - threshold: Configured threshold percentage
+                - min_records_before_check: Minimum records before checking threshold
         """
         with self._lock:
             failures_in_window = sum(1 for r in self._results if not r)
@@ -265,9 +267,11 @@ class CircuitBreaker:
                 'is_open': self._is_open,
                 'total_processed': self._total_processed,
                 'total_failures': self._total_failures,
-                'window_size': total_in_window,
+                'window_size': self.config.window_size,
+                'records_in_window': total_in_window,
                 'failures_in_window': failures_in_window,
                 'failure_rate': failure_rate,
                 'threshold': self.config.failure_threshold_percent,
+                'min_records_before_check': self.config.min_records_before_check,
             }
 
