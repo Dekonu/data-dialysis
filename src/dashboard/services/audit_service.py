@@ -118,7 +118,7 @@ class AuditService:
             total = count_result[0] if count_result else 0
             
             # Add sorting and pagination
-            # Use parameterized column name from validated mapping
+            # Use validated column name from allowlist
             query += f" ORDER BY {safe_sort_by} {sort_order}"
             query += " LIMIT ? OFFSET ?"
             params.extend([limit, offset])
@@ -319,7 +319,7 @@ class AuditService:
                         summary_stats["by_adapter"][adapter] = summary_stats["by_adapter"].get(adapter, 0) + count
             
             # Add sorting and pagination
-            # Use parameterized column name from validated mapping
+            # Use validated column name from allowlist
             query += f" ORDER BY {safe_sort_by} {sort_order}"
             query += " LIMIT ? OFFSET ?"
             params.extend([limit, offset])
