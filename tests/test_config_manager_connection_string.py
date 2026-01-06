@@ -230,13 +230,11 @@ class TestEnvironmentVariables:
                 import dotenv
                 # Patch dotenv.load_dotenv where it's actually used
                 dotenv_patch = patch('dotenv.load_dotenv', side_effect=lambda *args, **kwargs: None)
-                use_dotenv_patch = True
             except ImportError:
                 # If dotenv is not installed, we don't need to patch anything
                 # The import will fail anyway and .env won't be loaded
                 from contextlib import nullcontext
                 dotenv_patch = nullcontext()
-                use_dotenv_patch = False
             
             with dotenv_patch, \
                  patch.dict(os.environ, {
