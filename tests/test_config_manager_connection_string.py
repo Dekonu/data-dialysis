@@ -8,6 +8,7 @@ These tests verify that:
 
 import pytest
 import os
+from contextlib import nullcontext
 from unittest.mock import patch
 
 from src.infrastructure.config_manager import (
@@ -233,7 +234,6 @@ class TestEnvironmentVariables:
             except ImportError:
                 # If dotenv is not installed, we don't need to patch anything
                 # The import will fail anyway and .env won't be loaded
-                from contextlib import nullcontext
                 dotenv_patch = nullcontext()
             
             with dotenv_patch, \
