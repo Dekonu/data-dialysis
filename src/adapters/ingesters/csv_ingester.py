@@ -476,29 +476,93 @@ class CSVIngester(IngestionPort):
         """
         df_redacted = df.copy()
         
+        # Get redaction context for logging (if available)
+        try:
+            from src.infrastructure.redaction_context import get_redaction_context
+            context = get_redaction_context()
+            logger_available = context is not None and context.get('logger') is not None
+        except (ImportError, AttributeError):
+            logger_available = False
+        
+        # Helper function to log redactions from vectorized operations
+        def log_vectorized_redactions(series: pd.Series, field_name: str, rule_triggered: str, original_series: pd.Series) -> None:
+            """Log redactions that occurred during vectorized operations."""
+            if not logger_available:
+                return
+            
+            # Find rows where redaction occurred (value changed and matches mask)
+            if field_name == 'ssn':
+                mask = RedactorService.SSN_MASK
+            elif field_name in ['phone', 'fax']:
+                mask = RedactorService.PHONE_MASK
+            elif field_name == 'email':
+                mask = RedactorService.EMAIL_MASK
+            elif field_name in ['first_name', 'last_name', 'family_name', 'given_names', 'emergency_contact_name']:
+                mask = RedactorService.NAME_MASK
+            elif field_name in ['address_line1', 'address_line2']:
+                mask = RedactorService.ADDRESS_MASK
+            else:
+                return  # Unknown field type
+            
+            # Find indices where redaction occurred
+            redacted_mask = (series == mask) & (original_series.notna()) & (original_series != mask)
+            if redacted_mask.any():
+                logger = context.get('logger')
+                source_adapter = context.get('source_adapter')
+                ingestion_id = context.get('ingestion_id')
+                
+                # Log each redaction
+                for idx in original_series[redacted_mask].index:
+                    original_value = str(original_series.iloc[idx])
+                    # Get record_id from DataFrame if available
+                    record_id = None
+                    if 'patient_id' in df_redacted.columns and idx in df_redacted.index:
+                        record_id = str(df_redacted.loc[idx, 'patient_id'])
+                    
+                    logger.log_redaction(
+                        field_name=field_name,
+                        original_value=original_value,
+                        rule_triggered=rule_triggered,
+                        record_id=record_id,
+                        source_adapter=source_adapter
+                    )
+        
         # Apply vectorized redaction to PII columns that don't have pattern constraints
         if 'ssn' in df_redacted.columns:
+            original_ssn = df_redacted['ssn'].copy()
             df_redacted['ssn'] = RedactorService.redact_ssn(df_redacted['ssn'])
+            log_vectorized_redactions(df_redacted['ssn'], 'ssn', 'SSN_PATTERN', original_ssn)
         
         if 'first_name' in df_redacted.columns:
+            original_first_name = df_redacted['first_name'].copy()
             df_redacted['first_name'] = RedactorService.redact_name(df_redacted['first_name'])
+            log_vectorized_redactions(df_redacted['first_name'], 'first_name', 'NAME_PATTERN', original_first_name)
         
         if 'last_name' in df_redacted.columns:
+            original_last_name = df_redacted['last_name'].copy()
             df_redacted['last_name'] = RedactorService.redact_name(df_redacted['last_name'])
+            log_vectorized_redactions(df_redacted['last_name'], 'last_name', 'NAME_PATTERN', original_last_name)
         
         if 'phone' in df_redacted.columns:
+            original_phone = df_redacted['phone'].copy()
             df_redacted['phone'] = RedactorService.redact_phone(df_redacted['phone'])
+            log_vectorized_redactions(df_redacted['phone'], 'phone', 'PHONE_PATTERN', original_phone)
         
         if 'email' in df_redacted.columns:
+            original_email = df_redacted['email'].copy()
             df_redacted['email'] = RedactorService.redact_email(df_redacted['email'])
+            log_vectorized_redactions(df_redacted['email'], 'email', 'EMAIL_PATTERN', original_email)
         
         if 'address_line1' in df_redacted.columns:
+            original_address = df_redacted['address_line1'].copy()
             df_redacted['address_line1'] = RedactorService.redact_address(df_redacted['address_line1'])
+            log_vectorized_redactions(df_redacted['address_line1'], 'address_line1', 'ADDRESS_PATTERN', original_address)
         
         # Note: postal_code is NOT redacted here because it needs to pass pattern validation first
         # It will be redacted by the Pydantic validator after validation
         
         # Date of birth is always redacted (set to None)
+        # Note: DOB redaction is logged by the Pydantic validator
         if 'date_of_birth' in df_redacted.columns:
             df_redacted['date_of_birth'] = None
         
@@ -541,20 +605,24 @@ class CSVIngester(IngestionPort):
                 # Set record_id in context for this row (if available)
                 # This allows validators to log redactions with the correct record_id
                 patient_id = row_dict.get('patient_id')
-                if patient_id:
-                    try:
-                        from src.infrastructure.redaction_context import set_redaction_context, get_redaction_context
-                        context = get_redaction_context()
-                        if context:
-                            # Update context with this record's ID
-                            set_redaction_context(
-                                logger=context.get('logger'),
-                                record_id=str(patient_id),
-                                source_adapter=context.get('source_adapter'),
-                                ingestion_id=context.get('ingestion_id')
-                            )
-                    except (ImportError, AttributeError):
-                        pass  # Context not available - skip (e.g., in tests)
+                try:
+                    from src.infrastructure.redaction_context import set_redaction_context, get_redaction_context
+                    context = get_redaction_context()
+                    if context and patient_id:
+                        # Update context with this record's ID
+                        set_redaction_context(
+                            logger=context.get('logger'),
+                            record_id=str(patient_id),
+                            source_adapter=context.get('source_adapter'),
+                            ingestion_id=context.get('ingestion_id')
+                        )
+                    elif not context:
+                        # Context not set - this means redaction logging won't work
+                        # This is expected in tests but should be set in production
+                        logger.debug("Redaction context not available - redaction logging disabled")
+                except (ImportError, AttributeError) as e:
+                    logger.debug(f"Could not set redaction context: {e}")
+                    pass  # Context not available - skip (e.g., in tests)
                 
                 # Create PatientRecord (validates and applies additional redaction via validators)
                 patient = PatientRecord(**{k: v for k, v in row_dict.items() if k in PatientRecord.model_fields})
