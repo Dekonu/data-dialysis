@@ -21,6 +21,7 @@ Architecture:
 import logging
 import uuid
 import threading
+import time
 from datetime import datetime
 from typing import Optional, Any
 from urllib.parse import quote_plus
@@ -1060,6 +1061,8 @@ class PostgreSQLAdapter(StoragePort):
     def _persist_dataframe_copy(self, df: pd.DataFrame, table_name: str) -> Result[int]:
         """Persist DataFrame using PostgreSQL COPY command (optimized for large batches).
         
+        Tracks processing time for latency metrics.
+        
         COPY is 2-3x faster than INSERT for bulk data operations.
         
         Parameters:
@@ -1072,6 +1075,7 @@ class PostgreSQLAdapter(StoragePort):
         if df.empty:
             return Result.success_result(0)
         
+        start_time = time.time()
         conn = None
         try:
             if not self._initialized:
@@ -1207,9 +1211,16 @@ class PostgreSQLAdapter(StoragePort):
             conn.commit()
             cursor.close()
             
-            logger.info(f"Persisted {total_rows} rows to table '{table_name}' using COPY")
+            # Calculate processing time
+            processing_time_seconds = time.time() - start_time
+            processing_time_ms = processing_time_seconds * 1000
             
-            # Log audit event
+            logger.info(
+                f"Persisted {total_rows} rows to table '{table_name}' using COPY "
+                f"in {processing_time_ms:.2f}ms ({total_rows/processing_time_seconds:.0f} rows/sec)"
+            )
+            
+            # Log audit event with processing time
             source_adapter = 'bulk_ingestion'
             if 'source_adapter' in df.columns:
                 source_adapter_series = df['source_adapter'].dropna()
@@ -1220,7 +1231,11 @@ class PostgreSQLAdapter(StoragePort):
                 event_type="BULK_PERSISTENCE",
                 record_id=None,
                 transformation_hash=None,
-                details={"source_adapter": source_adapter},
+                details={
+                    "source_adapter": source_adapter,
+                    "processing_time_ms": round(processing_time_ms, 2),
+                    "processing_time_seconds": round(processing_time_seconds, 4),
+                },
                 table_name=table_name,
                 row_count=total_rows,
                 source_adapter=source_adapter
@@ -1253,6 +1268,7 @@ class PostgreSQLAdapter(StoragePort):
         if df.empty:
             return Result.success_result(0)
         
+        start_time = time.time()
         engine = None
         try:
             if not self._initialized:
@@ -1448,7 +1464,14 @@ class PostgreSQLAdapter(StoragePort):
                 cursor.close()
                 conn.close()
             
-            logger.info(f"Persisted {total_rows} rows to table '{table_name}'")
+            # Calculate processing time
+            processing_time_seconds = time.time() - start_time
+            processing_time_ms = processing_time_seconds * 1000
+            
+            logger.info(
+                f"Persisted {total_rows} rows to table '{table_name}' "
+                f"in {processing_time_ms:.2f}ms ({total_rows/processing_time_seconds:.0f} rows/sec)"
+            )
             
             # Extract source_adapter from dataframe if available
             source_adapter = 'bulk_ingestion'
@@ -1458,13 +1481,15 @@ class PostgreSQLAdapter(StoragePort):
                 if len(source_adapter_series) > 0:
                     source_adapter = str(source_adapter_series.iloc[0])
             
-            # Log audit event (bulk operation)
+            # Log audit event (bulk operation) with processing time
             self.log_audit_event(
                 event_type="BULK_PERSISTENCE",
                 record_id=None,
                 transformation_hash=None,
                 details={
                     "source_adapter": source_adapter,
+                    "processing_time_ms": round(processing_time_ms, 2),
+                    "processing_time_seconds": round(processing_time_seconds, 4),
                 },
                 table_name=table_name,
                 row_count=total_rows

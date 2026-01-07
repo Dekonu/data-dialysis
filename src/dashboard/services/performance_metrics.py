@@ -4,6 +4,7 @@ This service provides performance-specific metrics including throughput,
 latency, file processing, and memory usage.
 """
 
+import json
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -133,50 +134,87 @@ class PerformanceMetricsService:
                 if not results:
                     return ThroughputMetrics(records_per_second=0.0)
                 
-                # Calculate total records and time span from audit events
+                # Calculate total records and sum of processing times from audit events
+                # Use processing_time_seconds from details if available (more accurate)
+                # Otherwise fall back to wall-clock time between batches
                 total_records = 0
+                total_processing_time = 0.0
                 min_timestamp = None
                 max_timestamp = None
+                batch_count = 0
+                peak_records_per_second = 0.0
                 
                 for row in results:
                     if isinstance(row, (list, tuple)):
                         event_time = row[0]
                         row_count = row[1] if len(row) > 1 else 0
+                        details_json = row[2] if len(row) > 2 else None
                     else:
                         event_time = row.get('event_timestamp')
                         row_count = row.get('row_count', 0)
+                        details_json = row.get('details')
                     
                     if event_time and row_count:
                         total_records += row_count
+                        batch_count += 1
                         
-                        # Track min/max timestamps from actual processing events
+                        # Try to get processing_time_seconds from details
+                        processing_time = None
+                        if details_json:
+                            try:
+                                if isinstance(details_json, str):
+                                    details = json.loads(details_json)
+                                else:
+                                    details = details_json
+                                
+                                # Check for processing_time_seconds in details
+                                processing_time = details.get('processing_time_seconds')
+                            except (json.JSONDecodeError, AttributeError, TypeError):
+                                pass
+                        
+                        # If we have processing time, use it; otherwise estimate from row count
+                        if processing_time and processing_time > 0:
+                            total_processing_time += processing_time
+                            # Calculate throughput for this batch
+                            batch_throughput = row_count / processing_time
+                            if batch_throughput > peak_records_per_second:
+                                peak_records_per_second = batch_throughput
+                        else:
+                            # Fallback: estimate processing time (will use wall-clock time later)
+                            pass
+                        
+                        # Track min/max timestamps for fallback calculation
                         if min_timestamp is None or event_time < min_timestamp:
                             min_timestamp = event_time
                         if max_timestamp is None or event_time > max_timestamp:
                             max_timestamp = event_time
                 
-                # Calculate throughput based on actual processing time span
-                if total_records > 0 and min_timestamp and max_timestamp:
-                    # Use actual time span between first and last batch
-                    actual_time_delta = (max_timestamp - min_timestamp).total_seconds()
-                    # Minimum 1 second to avoid division by zero
-                    if actual_time_delta <= 0:
-                        actual_time_delta = 1.0
-                    records_per_second = total_records / actual_time_delta
-                elif total_records > 0:
-                    # Fallback: if we can't determine time span, use full range
-                    time_delta = (end_time - start_time).total_seconds()
-                    if time_delta > 0:
-                        records_per_second = total_records / time_delta
+                # Calculate throughput based on actual processing time (not wall-clock time)
+                if total_records > 0:
+                    if total_processing_time > 0:
+                        # Use sum of actual processing times (excludes delays between batches)
+                        records_per_second = total_records / total_processing_time
+                    elif min_timestamp and max_timestamp:
+                        # Fallback: use wall-clock time between first and last batch
+                        actual_time_delta = (max_timestamp - min_timestamp).total_seconds()
+                        # Minimum 1 second to avoid division by zero
+                        if actual_time_delta <= 0:
+                            actual_time_delta = 1.0
+                        records_per_second = total_records / actual_time_delta
                     else:
-                        records_per_second = 0.0
+                        # Final fallback: use full time range
+                        time_delta = (end_time - start_time).total_seconds()
+                        if time_delta > 0:
+                            records_per_second = total_records / time_delta
+                        else:
+                            records_per_second = 0.0
                 else:
                     records_per_second = 0.0
                 
                 return ThroughputMetrics(
                     records_per_second=round(records_per_second, 2),
                     mb_per_second=None,
-                    peak_records_per_second=None
+                    peak_records_per_second=round(peak_records_per_second, 2) if peak_records_per_second > 0 else None
                 )
             
         except Exception as e:
@@ -188,10 +226,9 @@ class PerformanceMetricsService:
         start_time: datetime,
         end_time: datetime
     ) -> LatencyMetrics:
-        """Get latency metrics.
+        """Get latency metrics from BULK_PERSISTENCE events.
         
-        Note: Latency metrics would require timing data to be stored.
-        This is a placeholder implementation.
+        Calculates latency statistics from processing_time_ms stored in audit log details.
         
         Parameters:
             start_time: Start time
@@ -200,14 +237,92 @@ class PerformanceMetricsService:
         Returns:
             LatencyMetrics: Latency statistics
         """
-        # Latency metrics would need to be tracked during ingestion
-        # For now, return placeholder values
-        return LatencyMetrics(
-            avg_processing_time_ms=None,
-            p50_ms=None,
-            p95_ms=None,
-            p99_ms=None
-        )
+        try:
+            if not hasattr(self.storage, '_get_connection'):
+                return LatencyMetrics(
+                    avg_processing_time_ms=None,
+                    p50_ms=None,
+                    p95_ms=None,
+                    p99_ms=None
+                )
+            
+            with get_db_connection(self.storage) as conn:
+                if conn is None:
+                    return LatencyMetrics(
+                        avg_processing_time_ms=None,
+                        p50_ms=None,
+                        p95_ms=None,
+                        p99_ms=None
+                    )
+                
+                # Get BULK_PERSISTENCE events with processing times
+                query = """
+                    SELECT details
+                    FROM audit_log
+                    WHERE event_type = 'BULK_PERSISTENCE'
+                    AND event_timestamp >= ? AND event_timestamp <= ?
+                    AND details IS NOT NULL
+                """
+                results = conn.execute(query, [start_time, end_time]).fetchall()
+                
+                if not results:
+                    return LatencyMetrics(
+                        avg_processing_time_ms=None,
+                        p50_ms=None,
+                        p95_ms=None,
+                        p99_ms=None
+                    )
+                
+                # Extract processing times from details
+                processing_times = []
+                
+                for row in results:
+                    details_json = row[0] if isinstance(row, (list, tuple)) else row.get('details')
+                    if details_json:
+                        try:
+                            if isinstance(details_json, str):
+                                details = json.loads(details_json)
+                            else:
+                                details = details_json
+                            
+                            processing_time_ms = details.get('processing_time_ms')
+                            if processing_time_ms is not None:
+                                processing_times.append(float(processing_time_ms))
+                        except (json.JSONDecodeError, AttributeError, TypeError, ValueError):
+                            continue
+                
+                if not processing_times:
+                    return LatencyMetrics(
+                        avg_processing_time_ms=None,
+                        p50_ms=None,
+                        p95_ms=None,
+                        p99_ms=None
+                    )
+                
+                # Calculate statistics
+                processing_times.sort()
+                n = len(processing_times)
+                
+                avg_processing_time_ms = sum(processing_times) / n
+                p50_ms = processing_times[n // 2] if n > 0 else None
+                p95_ms = processing_times[int(n * 0.95)] if n > 1 else processing_times[-1] if n > 0 else None
+                p99_ms = processing_times[int(n * 0.99)] if n > 1 else processing_times[-1] if n > 0 else None
+                
+                return LatencyMetrics(
+                    avg_processing_time_ms=round(avg_processing_time_ms, 2),
+                    p50_ms=round(p50_ms, 2) if p50_ms is not None else None,
+                    p95_ms=round(p95_ms, 2) if p95_ms is not None else None,
+                    p99_ms=round(p99_ms, 2) if p99_ms is not None else None
+                )
+            
+        except Exception as e:
+            logger.warning(f"Error getting latency metrics: {str(e)}")
+            return LatencyMetrics(
+                avg_processing_time_ms=None,
+                p50_ms=None,
+                p95_ms=None,
+                p99_ms=None
+            )
     
     def _get_file_processing_metrics(
         self,
