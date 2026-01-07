@@ -55,9 +55,10 @@ async function SecurityMetricsContent({ timeRange }: { timeRange: TimeRange }) {
 export default async function SecurityPage({
   searchParams,
 }: {
-  searchParams: { timeRange?: TimeRange };
+  searchParams: Promise<{ timeRange?: TimeRange }>;
 }) {
-  const timeRange = (searchParams.timeRange as TimeRange) || '7d';
+  const params = await searchParams;
+  const timeRange = (params.timeRange as TimeRange) || '7d';
 
   return (
     <div className="space-y-4 sm:space-y-6">

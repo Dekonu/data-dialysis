@@ -21,18 +21,19 @@ import {
 import type { TimeRange } from '@/types/api';
 
 interface AuditLogsContentProps {
-  searchParams: {
+  searchParams: Promise<{
     timeRange?: TimeRange;
     limit?: string;
     offset?: string;
     severity?: string;
     event_type?: string;
-  };
+  }>;
 }
 
 async function AuditLogsContent({ searchParams }: AuditLogsContentProps) {
-  const limit = parseInt(searchParams.limit || '100');
-  const offset = parseInt(searchParams.offset || '0');
+  const params = await searchParams;
+  const limit = parseInt(params.limit || '100');
+  const offset = parseInt(params.offset || '0');
 
   let auditLogs;
   let error: string | null = null;
@@ -41,8 +42,8 @@ async function AuditLogsContent({ searchParams }: AuditLogsContentProps) {
     auditLogs = await api.audit.logs({
       limit,
       offset,
-      severity: searchParams.severity || undefined,
-      event_type: searchParams.event_type || undefined,
+      severity: params.severity || undefined,
+      event_type: params.event_type || undefined,
       sort_by: 'event_timestamp',
       sort_order: 'DESC',
     });
@@ -251,14 +252,16 @@ async function AuditLogsContent({ searchParams }: AuditLogsContentProps) {
 export default async function AuditPage({
   searchParams,
 }: {
-  searchParams: {
+  searchParams: Promise<{
     timeRange?: TimeRange;
     limit?: string;
     offset?: string;
     severity?: string;
     event_type?: string;
-  };
+  }>;
 }) {
+  const params = await searchParams;
+  
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -283,7 +286,7 @@ export default async function AuditPage({
           </Card>
         }
       >
-        <AuditLogsContent searchParams={searchParams} />
+        <AuditLogsContent searchParams={Promise.resolve(params)} />
       </Suspense>
     </div>
   );

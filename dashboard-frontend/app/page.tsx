@@ -169,9 +169,10 @@ async function DashboardContent({ timeRange }: DashboardContentProps) {
 export default async function HomePage({
   searchParams,
 }: {
-  searchParams: { timeRange?: TimeRange };
+  searchParams: Promise<{ timeRange?: TimeRange }>;
 }) {
-  const timeRange = (searchParams.timeRange as TimeRange) || '24h';
+  const params = await searchParams;
+  const timeRange = (params.timeRange as TimeRange) || '24h';
 
   return (
     <div className="space-y-4 sm:space-y-6">

@@ -14,19 +14,20 @@ import { TimeRangeSelector } from '@/components/dashboard/time-range-selector';
 import type { TimeRange } from '@/types/api';
 
 interface RedactionLogsContentProps {
-  searchParams: {
+  searchParams: Promise<{
     timeRange?: TimeRange;
     limit?: string;
     offset?: string;
     field_name?: string;
     rule_triggered?: string;
-  };
+  }>;
 }
 
 async function RedactionLogsContent({ searchParams }: RedactionLogsContentProps) {
-  const limit = parseInt(searchParams.limit || '100');
-  const offset = parseInt(searchParams.offset || '0');
-  const timeRange = (searchParams.timeRange as TimeRange) || '24h';
+  const params = await searchParams;
+  const limit = parseInt(params.limit || '100');
+  const offset = parseInt(params.offset || '0');
+  const timeRange = (params.timeRange as TimeRange) || '24h';
 
   let redactionLogs;
   let error: string | null = null;
@@ -36,8 +37,8 @@ async function RedactionLogsContent({ searchParams }: RedactionLogsContentProps)
       time_range: timeRange,
       limit,
       offset,
-      field_name: searchParams.field_name || undefined,
-      rule_triggered: searchParams.rule_triggered || undefined,
+      field_name: params.field_name || undefined,
+      rule_triggered: params.rule_triggered || undefined,
       sort_by: 'timestamp',
       sort_order: 'DESC',
     });
@@ -195,15 +196,16 @@ async function RedactionLogsContent({ searchParams }: RedactionLogsContentProps)
 export default async function RedactionsPage({
   searchParams,
 }: {
-  searchParams: {
+  searchParams: Promise<{
     timeRange?: TimeRange;
     limit?: string;
     offset?: string;
     field_name?: string;
     rule_triggered?: string;
-  };
+  }>;
 }) {
-  const timeRange = (searchParams.timeRange as TimeRange) || '24h';
+  const params = await searchParams;
+  const timeRange = (params.timeRange as TimeRange) || '24h';
 
   return (
     <div className="space-y-6">
@@ -232,7 +234,7 @@ export default async function RedactionsPage({
           </Card>
         }
       >
-        <RedactionLogsContent searchParams={searchParams} />
+        <RedactionLogsContent searchParams={Promise.resolve(params)} />
       </Suspense>
     </div>
   );

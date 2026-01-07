@@ -3,9 +3,12 @@
 import { Button } from '@/components/ui/button';
 import { Download } from 'lucide-react';
 
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+
 export function AuditExportButtons() {
   const handleExport = (format: 'json' | 'csv') => {
-    window.open(`/api/audit-logs/export?format=${format}`, '_blank');
+    const url = `${API_BASE_URL}/api/audit-logs/export?format=${format}`;
+    window.open(url, '_blank');
   };
 
   return (
