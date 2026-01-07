@@ -708,6 +708,36 @@ class NERPort(ABC):
         """
         pass
     
+    def extract_person_names_batch(self, texts: list[str]) -> list[list[tuple[str, int, int]]]:
+        """Extract person names from multiple texts in batch (optional optimization).
+        
+        This method provides batch processing for better performance when processing
+        many texts. Adapters can override this for optimized batch processing, or
+        fall back to calling extract_person_names() for each text.
+        
+        Parameters:
+            texts: List of input texts to analyze
+        
+        Returns:
+            List of results, where each result is a list of (name, start_pos, end_pos) tuples.
+            The order matches the input texts list.
+        
+        Security Impact:
+            - More efficient than calling extract_person_names() individually
+            - Enables processing thousands of texts in seconds instead of minutes
+            - Same security guarantees as single-text processing
+        
+        Example:
+            ```python
+            texts = ["Patient John Smith visited.", "Dr. Jane Doe examined the patient."]
+            results = adapter.extract_person_names_batch(texts)
+            # Returns: [[("John Smith", 8, 18)], [("Jane Doe", 0, 8)]]
+            ```
+        """
+        # Default implementation: fall back to individual calls
+        # Adapters should override this for optimized batch processing
+        return [self.extract_person_names(text) for text in texts]
+    
     @abstractmethod
     def is_available(self) -> bool:
         """Check if NER service is available and ready to use.

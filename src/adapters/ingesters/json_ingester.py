@@ -599,6 +599,46 @@ class JSONIngester(IngestionPort):
         encounters_df = pd.DataFrame(encounters_records) if encounters_records else pd.DataFrame()
         observations_df = pd.DataFrame(observations_records) if observations_records else pd.DataFrame()
         
+        # Batch process observation notes with NER (performance optimization)
+        if not observations_df.empty and 'notes' in observations_df.columns:
+            try:
+                # Get NER adapter for batch processing
+                from src.domain.services import RedactorService
+                ner_adapter = RedactorService._get_ner_adapter()
+                
+                if ner_adapter and ner_adapter.is_available():
+                    # Extract notes column for batch processing
+                    notes_list = observations_df['notes'].fillna('').astype(str).tolist()
+                    
+                    # Batch redact notes with NER
+                    logger.debug(
+                        f"Batch processing {len(notes_list)} observation notes with NER "
+                        f"for chunk {chunk_number}"
+                    )
+                    redacted_notes = RedactorService.redact_observation_notes_batch(
+                        notes_list, 
+                        ner_adapter=ner_adapter
+                    )
+                    
+                    # Update DataFrame with batch-redacted notes
+                    observations_df['notes'] = redacted_notes
+                    
+                    logger.debug(
+                        f"Completed batch NER processing for {len(notes_list)} notes "
+                        f"in chunk {chunk_number}"
+                    )
+                else:
+                    logger.debug(
+                        f"NER not available, skipping batch NER processing for chunk {chunk_number}"
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"Error in batch NER processing for chunk {chunk_number}: {e}. "
+                    f"Notes were redacted with regex-only during validation.",
+                    exc_info=True
+                )
+                # Continue with regex-only redacted notes (already done in validator)
+        
         # Log DataFrame creation for debugging
         if len(observations_records) > 0:
             logger.debug(

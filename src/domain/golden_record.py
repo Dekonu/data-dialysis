@@ -625,13 +625,21 @@ class ClinicalObservation(BaseModel):
     @field_validator("notes", mode="before")
     @classmethod
     def redact_notes(cls, v: Optional[str]) -> Optional[str]:
-        """Redact PII from clinical notes using RedactorService.
+        """Redact PII from clinical notes using RedactorService (regex-only during validation).
         
         Security Impact: Unstructured notes are scanned and PII is redacted
         before being stored in the model.
+        
+        Note: NER-based redaction is deferred to batch processing for performance.
+        This validator only applies regex-based redaction (SSN, phone, email).
         """
+        if not v:
+            return None
+        
+        # Apply regex-based redaction only (fast, no NER)
+        # NER will be applied later in batch processing
         original = v
-        result = RedactorService.redact_observation_notes(v)
+        result = RedactorService.redact_observation_notes_fast(v)
         if result != original:
             log_redaction_if_context("notes", original, "OBSERVATION_NOTES_PII_DETECTION")
         return result

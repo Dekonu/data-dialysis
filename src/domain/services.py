@@ -607,10 +607,10 @@ class RedactorService:
     
     @staticmethod
     def redact_observation_notes(notes: Optional[str]) -> Optional[str]:
-        """Redact PII from clinical observation notes.
+        """Redact PII from clinical observation notes (full redaction with NER).
         
         Security Impact: Removes PII from unstructured clinical notes to prevent
-        patient identification through narrative text.
+        patient identification through narrative text. Uses both regex and NER.
         
         Parameters:
             notes: Clinical notes text that may contain PII
@@ -619,4 +619,108 @@ class RedactorService:
             Notes with PII redacted or None if input is None
         """
         return RedactorService.redact_unstructured_text(notes)
+    
+    @staticmethod
+    def redact_observation_notes_fast(notes: Optional[str]) -> Optional[str]:
+        """Redact PII from clinical observation notes (regex-only, fast).
+        
+        This method only applies regex-based redaction (SSN, phone, email) and
+        skips NER for performance. Use this during validation, then apply batch
+        NER processing later.
+        
+        Security Impact: Removes structured PII (SSN, phone, email) but defers
+        NER-based name detection to batch processing.
+        
+        Parameters:
+            notes: Clinical notes text that may contain PII
+        
+        Returns:
+            Notes with structured PII redacted or None if input is None
+        """
+        if not notes:
+            return None
+        
+        text = str(notes)
+        
+        # Redact SSNs (always use regex - fast and accurate)
+        text = RedactorService.SSN_PATTERN.sub(RedactorService.SSN_MASK, text)
+        
+        # Redact phone numbers (always use regex)
+        text = RedactorService.PHONE_PATTERN.sub(RedactorService.PHONE_MASK, text)
+        
+        # Redact email addresses (always use regex)
+        text = RedactorService.EMAIL_PATTERN.sub(RedactorService.EMAIL_MASK, text)
+        
+        # Skip NER - will be applied in batch processing
+        return text
+    
+    @staticmethod
+    def redact_observation_notes_batch(notes_list: list[Optional[str]], ner_adapter: Optional['NERPort'] = None) -> list[Optional[str]]:
+        """Redact PII from multiple clinical observation notes in batch (with NER).
+        
+        This method processes multiple notes efficiently using batch NER processing.
+        Much faster than calling redact_observation_notes() individually.
+        
+        Security Impact: Removes PII from unstructured clinical notes using both
+        regex and batch NER processing.
+        
+        Parameters:
+            notes_list: List of clinical notes text that may contain PII
+            ner_adapter: Optional NER adapter (will be fetched if not provided)
+        
+        Returns:
+            List of notes with PII redacted (same order as input)
+        """
+        if not notes_list:
+            return []
+        
+        # First pass: regex-based redaction (vectorized)
+        import pandas as pd
+        notes_series = pd.Series(notes_list)
+        
+        # Convert to string and handle None
+        notes_str = notes_series.astype(str)
+        notes_str = notes_str.replace('None', '')
+        notes_str = notes_str.replace('nan', '')
+        
+        # Apply regex redaction (vectorized)
+        notes_str = notes_str.str.replace(RedactorService.SSN_PATTERN.pattern, RedactorService.SSN_MASK, regex=True)
+        notes_str = notes_str.str.replace(RedactorService.PHONE_PATTERN.pattern, RedactorService.PHONE_MASK, regex=True)
+        notes_str = notes_str.str.replace(RedactorService.EMAIL_PATTERN.pattern, RedactorService.EMAIL_MASK, regex=True)
+        
+        # Get NER adapter if not provided
+        if ner_adapter is None:
+            ner_adapter = RedactorService._get_ner_adapter()
+        
+        # Second pass: batch NER processing for person names
+        if ner_adapter and ner_adapter.is_available():
+            try:
+                # Convert back to list for NER processing
+                notes_list_for_ner = notes_str.tolist()
+                
+                # Batch extract person names
+                name_results = ner_adapter.extract_person_names_batch(notes_list_for_ner)
+                
+                # Apply name redactions
+                redacted_notes = []
+                for idx, (text, names) in enumerate(zip(notes_list_for_ner, name_results)):
+                    if not text or text == 'nan':
+                        redacted_notes.append(None if notes_list[idx] is None else '')
+                        continue
+                    
+                    # Redact names in reverse order (to preserve character positions)
+                    redacted_text = text
+                    for name, start, end in reversed(names):
+                        redacted_text = redacted_text[:start] + RedactorService.NAME_MASK + redacted_text[end:]
+                    
+                    redacted_notes.append(redacted_text if redacted_text else None)
+                
+                return redacted_notes
+            except Exception as e:
+                logger.warning(f"Error in batch NER processing, falling back to regex-only: {e}")
+                # Fall back to regex-only
+                return notes_str.tolist()
+        else:
+            # No NER available, return regex-only results
+            return notes_str.tolist()
 

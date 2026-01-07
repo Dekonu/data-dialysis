@@ -125,6 +125,10 @@ def process_ingestion(
     failure_count = 0
     batch_records = []
     
+    # Track chunk completion for periodic redaction log flushing
+    # For JSON ingestion: chunk = patients + encounters + observations
+    chunk_tables_persisted = set()
+    
     logger.info(f"Starting ingestion from: {source}")
     
     # Set redaction context for this ingestion run
@@ -171,6 +175,30 @@ def process_ingestion(
                         if persist_result.is_success():
                             success_count += persist_result.value
                             logger.info(f"Persisted {persist_result.value} rows to {table_name}")
+                            
+                            # Track that we've persisted this table
+                            chunk_tables_persisted.add(table_name)
+                            
+                            # Flush redaction logs after completing a full chunk
+                            # For JSON: chunk = patients + encounters + observations
+                            # After observations are persisted, we've completed a chunk
+                            if table_name == 'observations' and hasattr(storage, 'flush_redaction_logs'):
+                                redaction_logs = redaction_logger.get_logs()
+                                if redaction_logs:
+                                    flush_result = storage.flush_redaction_logs(redaction_logs)
+                                    if flush_result.is_success():
+                                        logger.debug(
+                                            f"Flushed {flush_result.value} redaction logs to storage "
+                                            f"(chunk completed: {', '.join(chunk_tables_persisted)})"
+                                        )
+                                        # Clear logs after successful flush to avoid duplicates
+                                        redaction_logger.clear_logs()
+                                    else:
+                                        logger.warning(
+                                            f"Failed to flush redaction logs: {flush_result.error}"
+                                        )
+                                # Reset chunk tracking for next chunk
+                                chunk_tables_persisted.clear()
                         else:
                             failure_count += len(df)
                             logger.error(f"Failed to persist DataFrame: {persist_result.error}")
@@ -186,6 +214,24 @@ def process_ingestion(
                             if persist_result.is_success():
                                 success_count += len(batch_records)
                                 logger.info(f"Persisted batch of {len(batch_records)} records")
+                                
+                                # Flush redaction logs periodically for XML ingestion
+                                # Flush after each batch to keep dashboard updated
+                                if hasattr(storage, 'flush_redaction_logs'):
+                                    redaction_logs = redaction_logger.get_logs()
+                                    if redaction_logs:
+                                        flush_result = storage.flush_redaction_logs(redaction_logs)
+                                        if flush_result.is_success():
+                                            logger.debug(
+                                                f"Flushed {flush_result.value} redaction logs to storage "
+                                                f"(batch of {len(batch_records)} records)"
+                                            )
+                                            # Clear logs after successful flush to avoid duplicates
+                                            redaction_logger.clear_logs()
+                                        else:
+                                            logger.warning(
+                                                f"Failed to flush redaction logs: {flush_result.error}"
+                                            )
                             else:
                                 failure_count += len(batch_records)
                                 logger.error(f"Failed to persist batch: {persist_result.error}")
@@ -218,18 +264,21 @@ def process_ingestion(
                 if persist_result.is_success():
                     success_count += len(batch_records)
     
-    # Flush redaction logs to storage
-    logger.info("Flushing redaction logs to storage...")
+    # Flush any remaining redaction logs to storage (final flush)
+    # Note: Most logs should have been flushed periodically during ingestion,
+    # but this ensures we don't miss any logs from the final batch
+    logger.info("Flushing remaining redaction logs to storage...")
     redaction_logs = redaction_logger.get_logs()
     if redaction_logs and hasattr(storage, 'flush_redaction_logs'):
         flush_result = storage.flush_redaction_logs(redaction_logs)
         if flush_result.is_success():
-            logger.info(f"Flushed {flush_result.value} redaction logs to storage")
+            logger.info(f"Flushed {flush_result.value} remaining redaction logs to storage")
+            redaction_logger.clear_logs()
         else:
-            logger.warning(f"Failed to flush redaction logs: {flush_result.error}")
+            logger.warning(f"Failed to flush remaining redaction logs: {flush_result.error}")
     else:
         if not redaction_logs:
-            logger.info("No redaction logs to flush (redactions may have occurred in Pydantic validators)")
+            logger.debug("No remaining redaction logs to flush (already flushed during ingestion)")
         else:
             logger.warning("Storage adapter does not support flush_redaction_logs")
     
