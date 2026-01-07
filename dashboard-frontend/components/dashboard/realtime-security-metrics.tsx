@@ -19,20 +19,13 @@ export function RealtimeSecurityMetrics({
   initialMetrics,
   timeRange,
 }: RealtimeSecurityMetricsProps) {
-  const [metrics, setMetrics] = useState<SecurityMetrics>(initialMetrics);
-
   const {
     isConnected,
     securityMetrics,
-    error: wsError,
   } = useWebSocket(timeRange);
 
-  // Update metrics when WebSocket data arrives
-  useEffect(() => {
-    if (securityMetrics) {
-      setMetrics(securityMetrics);
-    }
-  }, [securityMetrics]);
+  // Use WebSocket data if available, otherwise fall back to initial metrics
+  const metrics = securityMetrics || initialMetrics;
 
   // Prepare chart data
   const redactionTrendData = metrics.redactions.trend.map((point) => ({

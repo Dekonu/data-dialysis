@@ -21,15 +21,6 @@ export function AuditDetailsCell({ details }: AuditDetailsCellProps) {
   }
 
   const fieldCount = Object.keys(details).length;
-  const previewFields = Object.entries(details)
-    .slice(0, 2)
-    .map(([key, value]) => {
-      const displayValue =
-        typeof value === 'object' && value !== null
-          ? JSON.stringify(value)
-          : String(value);
-      return { key, value: displayValue };
-    });
 
   return (
     <div className="relative">

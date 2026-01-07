@@ -14,27 +14,13 @@ interface RealtimeMetricsProps {
 }
 
 export function RealtimeMetrics({ initialMetrics, timeRange }: RealtimeMetricsProps) {
-  const [metrics, setMetrics] = useState<OverviewMetrics>(initialMetrics);
-  
   const {
     isConnected,
     overviewMetrics,
-    error: wsError,
   } = useWebSocket(timeRange);
 
-  // Update metrics when WebSocket data arrives
-  useEffect(() => {
-    if (overviewMetrics) {
-      setMetrics(overviewMetrics);
-    }
-  }, [overviewMetrics]);
-
-  // Fallback to initial metrics if WebSocket fails
-  useEffect(() => {
-    if (!isConnected && wsError && metrics === initialMetrics) {
-      // Already using initial metrics, no action needed
-    }
-  }, [isConnected, wsError, metrics, initialMetrics]);
+  // Use WebSocket data if available, otherwise fall back to initial metrics
+  const metrics = overviewMetrics || initialMetrics;
 
   const successRate = metrics.ingestions.success_rate;
   const recordSuccessRate =

@@ -1,6 +1,6 @@
 'use client';
 
-import { createContext, useContext, useEffect, useState } from 'react';
+import { createContext, useContext, useEffect, useState, useCallback } from 'react';
 
 type Theme = 'light' | 'dark' | 'system';
 
@@ -24,7 +24,9 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   };
 
   // Apply theme to document
-  const applyTheme = (newTheme: Theme) => {
+  const applyTheme = useCallback((newTheme: Theme) => {
+    if (typeof window === 'undefined') return;
+    
     const root = document.documentElement;
     const resolved = newTheme === 'system' ? getSystemTheme() : newTheme;
     
@@ -35,7 +37,7 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     }
     
     setResolvedTheme(resolved);
-  };
+  }, []);
 
   // Initialize theme from localStorage or system preference
   useEffect(() => {
@@ -47,7 +49,7 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     setThemeState(initialTheme);
     applyTheme(initialTheme);
     setMounted(true);
-  }, []);
+  }, [applyTheme]);
 
   // Listen for system theme changes
   useEffect(() => {
@@ -60,7 +62,7 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
 
     mediaQuery.addEventListener('change', handleChange);
     return () => mediaQuery.removeEventListener('change', handleChange);
-  }, [theme]);
+  }, [theme, applyTheme]);
 
   const setTheme = (newTheme: Theme) => {
     setThemeState(newTheme);

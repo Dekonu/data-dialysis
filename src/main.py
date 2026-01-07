@@ -161,7 +161,49 @@ def process_ingestion(
         'observations': None
     }
     
-    logger.info(f"Starting ingestion from: {source}")
+    # Phase 3: Parallel Chunk Processing
+    # Determine max parallel workers based on connection pool size
+    # PostgreSQL default: pool_size=5, max_overflow=10 → max_connections=15
+    # Use 2-4 workers to avoid exhausting connection pool
+    # Each worker needs connections for: patients (1) + encounters/observations (2) = 3 connections
+    # So max_workers = min(4, (max_connections - 2) // 3) to leave headroom
+    try:
+        # Try to get pool size from storage adapter
+        if hasattr(storage, 'pool_size'):
+            pool_size_val = storage.pool_size
+        elif hasattr(storage, '_connection_pool') and storage._connection_pool:
+            # Try to infer from connection pool
+            pool_size_val = 5  # Default
+        else:
+            pool_size_val = 5  # Default
+        max_overflow_val = getattr(storage, 'max_overflow', 10) or 10
+    except:
+        pool_size_val = 5
+        max_overflow_val = 10
+    
+    max_connections = pool_size_val + max_overflow_val
+    # Conservative: use 2-3 workers to avoid pool exhaustion
+    # Each chunk needs ~3 connections (patients + encounters + observations in parallel)
+    parallel_chunk_workers = min(3, max(2, (max_connections - 2) // 3))
+    
+    # Thread-safe counters for parallel chunk processing
+    parallel_success_count = threading.Lock()
+    parallel_failure_count = threading.Lock()
+    parallel_success = 0
+    parallel_failure = 0
+    
+    # Chunk processing executor for parallel chunk processing (Phase 3)
+    chunk_executor = ThreadPoolExecutor(
+        max_workers=parallel_chunk_workers,
+        thread_name_prefix="chunk-processor"
+    )
+    pending_chunk_futures = []  # Track pending chunk processing tasks
+    
+    logger.info(
+        f"Starting ingestion from: {source} "
+        f"(parallel chunk processing: {parallel_chunk_workers} workers, "
+        f"max connections: {max_connections})"
+    )
     
     # Set redaction context for this ingestion run
     # This context will be available to all Pydantic validators during validation
@@ -210,96 +252,165 @@ def process_ingestion(
                         # For JSON ingestion: chunk = patients + encounters + observations
                         # Check that all values are not None (can't use all() directly on DataFrames)
                         if all(df is not None for df in chunk_dataframes.values()):
-                            # Persist tables in order to respect foreign key constraints:
-                            # 1. Patients first (no dependencies)
-                            # 2. Encounters and observations in parallel (both depend on patients)
+                            # Phase 3: Parallel Chunk Processing
+                            # Create a copy of the chunk dataframes for parallel processing
+                            chunk_to_process = {
+                                'patients': chunk_dataframes['patients'].copy(),
+                                'encounters': chunk_dataframes['encounters'].copy(),
+                                'observations': chunk_dataframes['observations'].copy()
+                            }
+                            
+                            chunk_number = len(pending_chunk_futures) + 1
                             logger.info(
-                                f"Persisting complete chunk: "
-                                f"{len(chunk_dataframes['patients'])} patients, "
-                                f"{len(chunk_dataframes['encounters'])} encounters, "
-                                f"{len(chunk_dataframes['observations'])} observations"
+                                f"Submitting chunk {chunk_number} for parallel processing: "
+                                f"{len(chunk_to_process['patients'])} patients, "
+                                f"{len(chunk_to_process['encounters'])} encounters, "
+                                f"{len(chunk_to_process['observations'])} observations"
                             )
                             
-                            # Step 1: Persist patients first (required for FK constraints)
-                            patients_result = storage.persist_dataframe(
-                                chunk_dataframes['patients'],
-                                'patients'
-                            )
-                            if patients_result.is_success():
-                                success_count += patients_result.value
-                                logger.info(
-                                    f"Persisted {patients_result.value} rows to patients"
-                                )
-                                chunk_tables_persisted.add('patients')
-                            else:
-                                failure_count += len(chunk_dataframes['patients'])
-                                logger.error(f"Failed to persist patients: {patients_result.error}")
-                                # Skip rest of chunk if patients failed
-                                chunk_dataframes = {
-                                    'patients': None,
-                                    'encounters': None,
-                                    'observations': None
-                                }
-                                chunk_tables_persisted.clear()
-                                continue
-                            
-                            # Step 2: Persist encounters and observations in parallel
-                            # (both depend on patients, but are independent of each other)
-                            with ThreadPoolExecutor(max_workers=2) as executor:
-                                futures = {
-                                    executor.submit(
-                                        storage.persist_dataframe,
-                                        chunk_dataframes[table],
-                                        table
-                                    ): (chunk_dataframes[table], table)
-                                    for table in ['encounters', 'observations']
-                                    if chunk_dataframes[table] is not None
-                                }
+                            # Submit chunk for parallel processing
+                            def process_chunk_parallel(
+                                chunk_data: dict,
+                                storage_adapter: StoragePort,
+                                chunk_num: int,
+                                redaction_logger_instance,
+                                flush_lock_instance,
+                                flush_executor_instance,
+                                pending_flush_futures_list
+                            ) -> tuple[int, int]:
+                                """Process a complete chunk in parallel.
                                 
-                                # Process results as they complete
-                                for future in as_completed(futures):
-                                    df_persisted, table_name_persisted = futures[future]
-                                    try:
-                                        persist_result = future.result()
-                                        if persist_result.is_success():
-                                            success_count += persist_result.value
-                                            logger.info(
-                                                f"Persisted {persist_result.value} rows to {table_name_persisted} "
-                                                f"(parallel)"
-                                            )
-                                            chunk_tables_persisted.add(table_name_persisted)
-                                        else:
-                                            failure_count += len(df_persisted)
-                                            logger.error(
-                                                f"Failed to persist {table_name_persisted}: {persist_result.error}"
-                                            )
-                                    except Exception as e:
+                                Returns:
+                                    tuple[int, int]: (success_count, failure_count) for this chunk
+                                """
+                                chunk_success = 0
+                                chunk_failure = 0
+                                
+                                try:
+                                    # Persist tables in order to respect foreign key constraints:
+                                    # 1. Patients first (no dependencies)
+                                    # 2. Encounters and observations in parallel (both depend on patients)
+                                    
+                                    # Step 1: Persist patients first (required for FK constraints)
+                                    patients_result = storage_adapter.persist_dataframe(
+                                        chunk_data['patients'],
+                                        'patients'
+                                    )
+                                    if patients_result.is_success():
+                                        chunk_success += patients_result.value
+                                        logger.info(
+                                            f"[Chunk {chunk_num}] Persisted {patients_result.value} rows to patients"
+                                        )
+                                    else:
+                                        chunk_failure += len(chunk_data['patients'])
                                         logger.error(
-                                            f"Exception persisting {table_name_persisted}: {e}",
-                                            exc_info=True
+                                            f"[Chunk {chunk_num}] Failed to persist patients: {patients_result.error}"
                                         )
-                                        failure_count += len(df_persisted)
-                            
-                            # Flush redaction logs asynchronously after completing a full chunk
-                            # This doesn't block chunk processing - flush happens in background
-                            if hasattr(storage, 'flush_redaction_logs'):
-                                with flush_lock:
-                                    redaction_logs = redaction_logger.get_logs()
-                                    if redaction_logs:
-                                        # Copy logs for async flush (thread-safe)
-                                        logs_copy = redaction_logs.copy()
-                                        # Clear logs immediately to avoid duplicates
-                                        redaction_logger.clear_logs()
+                                        # Skip rest of chunk if patients failed
+                                        return (chunk_success, chunk_failure)
+                                    
+                                    # Step 2: Persist encounters and observations in parallel
+                                    # (both depend on patients, but are independent of each other)
+                                    with ThreadPoolExecutor(max_workers=2) as executor:
+                                        futures = {
+                                            executor.submit(
+                                                storage_adapter.persist_dataframe,
+                                                chunk_data[table],
+                                                table
+                                            ): (chunk_data[table], table)
+                                            for table in ['encounters', 'observations']
+                                            if chunk_data[table] is not None
+                                        }
                                         
-                                        # Submit async flush task
-                                        future = flush_executor.submit(
-                                            flush_redaction_logs_async,
-                                            storage,
-                                            logs_copy
-                                        )
-                                        pending_flush_futures.append(future)
+                                        # Process results as they complete
+                                        for future in as_completed(futures):
+                                            df_persisted, table_name_persisted = futures[future]
+                                            try:
+                                                persist_result = future.result()
+                                                if persist_result.is_success():
+                                                    chunk_success += persist_result.value
+                                                    logger.info(
+                                                        f"[Chunk {chunk_num}] Persisted {persist_result.value} rows to {table_name_persisted} "
+                                                        f"(parallel)"
+                                                    )
+                                                else:
+                                                    chunk_failure += len(df_persisted)
+                                                    logger.error(
+                                                        f"[Chunk {chunk_num}] Failed to persist {table_name_persisted}: {persist_result.error}"
+                                                    )
+                                            except Exception as e:
+                                                logger.error(
+                                                    f"[Chunk {chunk_num}] Exception persisting {table_name_persisted}: {e}",
+                                                    exc_info=True
+                                                )
+                                                chunk_failure += len(df_persisted)
+                                    
+                                    # Flush redaction logs asynchronously after completing a full chunk
+                                    # This doesn't block chunk processing - flush happens in background
+                                    if hasattr(storage_adapter, 'flush_redaction_logs'):
+                                        with flush_lock_instance:
+                                            redaction_logs = redaction_logger_instance.get_logs()
+                                            if redaction_logs:
+                                                # Copy logs for async flush (thread-safe)
+                                                logs_copy = redaction_logs.copy()
+                                                # Clear logs immediately to avoid duplicates
+                                                redaction_logger_instance.clear_logs()
+                                                
+                                                # Submit async flush task
+                                                future = flush_executor_instance.submit(
+                                                    flush_redaction_logs_async,
+                                                    storage_adapter,
+                                                    logs_copy
+                                                )
+                                                pending_flush_futures_list.append(future)
+                                
+                                except Exception as e:
+                                    logger.error(
+                                        f"[Chunk {chunk_num}] Error processing chunk: {e}",
+                                        exc_info=True
+                                    )
+                                    # Count all rows as failures
+                                    chunk_failure += (
+                                        len(chunk_data.get('patients', [])) +
+                                        len(chunk_data.get('encounters', [])) +
+                                        len(chunk_data.get('observations', []))
+                                    )
+                                
+                                return (chunk_success, chunk_failure)
                             
-                            # Reset chunk tracking for next chunk
+                            # Submit chunk for parallel processing
+                            future = chunk_executor.submit(
+                                process_chunk_parallel,
+                                chunk_to_process,
+                                storage,
+                                chunk_number,
+                                redaction_logger,
+                                flush_lock,
+                                flush_executor,
+                                pending_flush_futures
+                            )
+                            pending_chunk_futures.append(future)
+                            
+                            # Process completed chunks to update counters (non-blocking check)
+                            # This allows us to process results as they complete
+                            completed_futures = [f for f in pending_chunk_futures if f.done()]
+                            for completed_future in completed_futures:
+                                try:
+                                    chunk_success, chunk_failure = completed_future.result()
+                                    with parallel_success_count:
+                                        parallel_success += chunk_success
+                                    with parallel_failure_count:
+                                        parallel_failure += chunk_failure
+                                except Exception as e:
+                                    logger.error(f"Error getting chunk processing result: {e}", exc_info=True)
+                                    # Count as failure
+                                    with parallel_failure_count:
+                                        parallel_failure += 1
+                            
+                            # Remove completed futures
+                            pending_chunk_futures = [f for f in pending_chunk_futures if not f.done()]
+                            
+                            # Reset chunk tracking for next chunk (immediately, don't wait)
                             chunk_dataframes = {
                                 'patients': None,
                                 'encounters': None,
@@ -364,6 +475,28 @@ def process_ingestion(
                 else:
                     failure_count += len(batch_records)
                     logger.error(f"Failed to persist final batch: {persist_result.error}")
+            
+            # Wait for all pending parallel chunk processing to complete
+            logger.info(f"Waiting for {len(pending_chunk_futures)} pending chunks to complete...")
+            for future in pending_chunk_futures:
+                try:
+                    chunk_success, chunk_failure = future.result()
+                    with parallel_success_count:
+                        parallel_success += chunk_success
+                    with parallel_failure_count:
+                        parallel_failure += chunk_failure
+                except Exception as e:
+                    logger.error(f"Error processing chunk: {e}", exc_info=True)
+                    with parallel_failure_count:
+                        parallel_failure += 1
+            
+            # Add parallel processing results to main counters
+            success_count += parallel_success
+            failure_count += parallel_failure
+            
+            # Shutdown chunk executor
+            chunk_executor.shutdown(wait=True)
+            logger.info("Parallel chunk processing completed")
             
             # Persist any remaining DataFrames (JSON ingestion - incomplete chunk)
             remaining_tables = [table for table, df in chunk_dataframes.items() if df is not None]

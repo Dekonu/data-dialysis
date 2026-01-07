@@ -9,7 +9,6 @@ import {
   TableBody,
   TableCell,
   TableHead,
-  TableHeader,
   TableRow,
 } from '@/components/ui/table';
 import { AlertCircle, CheckCircle2, Wifi, WifiOff } from 'lucide-react';
@@ -24,21 +23,14 @@ export function RealtimeCircuitBreaker({
   initialStatus,
   timeRange,
 }: RealtimeCircuitBreakerProps) {
-  const [status, setStatus] = useState<CircuitBreakerStatus>(initialStatus);
-  
   const {
     isConnected,
     circuitBreakerStatus,
   } = useWebSocket(timeRange);
 
-  // Update status when WebSocket data arrives
-  useEffect(() => {
-    if (circuitBreakerStatus) {
-      setStatus(circuitBreakerStatus);
-    }
-  }, [circuitBreakerStatus]);
+  // Use WebSocket data if available, otherwise fall back to initial status
+  const status = circuitBreakerStatus || initialStatus;
 
-  const statusColor = status.is_open ? 'destructive' : 'default';
   const statusIcon = status.is_open ? (
     <AlertCircle className="h-5 w-5" />
   ) : (

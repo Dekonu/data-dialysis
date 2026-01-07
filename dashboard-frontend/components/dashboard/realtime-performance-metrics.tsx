@@ -17,20 +17,13 @@ export function RealtimePerformanceMetrics({
   initialMetrics,
   timeRange,
 }: RealtimePerformanceMetricsProps) {
-  const [metrics, setMetrics] = useState<PerformanceMetrics>(initialMetrics);
-
   const {
     isConnected,
     performanceMetrics,
-    error: wsError,
   } = useWebSocket(timeRange);
 
-  // Update metrics when WebSocket data arrives
-  useEffect(() => {
-    if (performanceMetrics) {
-      setMetrics(performanceMetrics);
-    }
-  }, [performanceMetrics]);
+  // Use WebSocket data if available, otherwise fall back to initial metrics
+  const metrics = performanceMetrics || initialMetrics;
 
   const formatLatency = (ms: number | null | undefined) => {
     if (ms === null || ms === undefined) return 'N/A';
