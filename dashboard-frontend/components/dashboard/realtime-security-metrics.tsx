@@ -1,6 +1,5 @@
 'use client';
 
-import { useEffect, useState } from 'react';
 import { useWebSocket } from '@/hooks/use-websocket';
 import { MetricsCard } from '@/components/dashboard/metrics-card';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';

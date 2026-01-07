@@ -1,6 +1,6 @@
 'use client';
 
-import { createContext, useContext, useEffect, useState, useCallback } from 'react';
+import { createContext, useContext, useEffect, useState, useCallback, useRef } from 'react';
 
 type Theme = 'light' | 'dark' | 'system';
 
@@ -13,15 +13,22 @@ interface ThemeContextType {
 const ThemeContext = createContext<ThemeContextType | undefined>(undefined);
 
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
-  const [theme, setThemeState] = useState<Theme>('system');
-  const [resolvedTheme, setResolvedTheme] = useState<'light' | 'dark'>('light');
-  const [mounted, setMounted] = useState(false);
-
+  // Initialize theme from localStorage or system preference (using function initializer)
+  const [theme, setThemeState] = useState<Theme>(() => {
+    if (typeof window === 'undefined') return 'system';
+    const stored = localStorage.getItem('theme') as Theme | null;
+    return stored || 'system';
+  });
+  
   // Get system preference
   const getSystemTheme = (): 'light' | 'dark' => {
     if (typeof window === 'undefined') return 'light';
     return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
   };
+
+  // Calculate resolved theme
+  const resolvedTheme = theme === 'system' ? getSystemTheme() : theme;
+  const mountedRef = useRef(false);
 
   // Apply theme to document
   const applyTheme = useCallback((newTheme: Theme) => {
@@ -35,21 +42,22 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     } else {
       root.classList.remove('dark');
     }
-    
-    setResolvedTheme(resolved);
   }, []);
 
-  // Initialize theme from localStorage or system preference
+  // Initialize theme on mount
   useEffect(() => {
     if (typeof window === 'undefined') return;
     
-    const stored = localStorage.getItem('theme') as Theme | null;
-    const initialTheme = stored || 'system';
-    
-    setThemeState(initialTheme);
-    applyTheme(initialTheme);
-    setMounted(true);
-  }, [applyTheme]);
+    applyTheme(theme);
+    mountedRef.current = true;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // Only run once on mount to apply initial theme
+
+  // Apply theme when it changes (after mount)
+  useEffect(() => {
+    if (typeof window === 'undefined' || !mountedRef.current) return;
+    applyTheme(theme);
+  }, [theme, applyTheme]);
 
   // Listen for system theme changes
   useEffect(() => {
@@ -74,8 +82,8 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
 
   // Always provide context, but use safe defaults during SSR
   const contextValue = {
-    theme: mounted ? theme : 'system',
-    resolvedTheme: mounted ? resolvedTheme : 'light',
+    theme: mountedRef.current ? theme : 'system',
+    resolvedTheme: mountedRef.current ? resolvedTheme : 'light',
     setTheme,
   };
 
