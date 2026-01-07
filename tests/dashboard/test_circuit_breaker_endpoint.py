@@ -16,9 +16,12 @@ def mock_storage_adapter():
     adapter = Mock()
     adapter.initialize_schema.return_value = Result.success_result(None)
     
-    # Mock connection
+    # Mock connection with cursor for PostgreSQL compatibility
     mock_conn = Mock()
+    mock_cursor = Mock()
+    mock_conn.cursor.return_value = mock_cursor
     adapter._get_connection = Mock(return_value=mock_conn)
+    adapter.connection_params = {}  # Indicates PostgreSQL adapter
     
     return adapter
 
@@ -45,16 +48,9 @@ class TestCircuitBreakerStatusEndpoint:
     def test_get_circuit_breaker_status_success(self, client, mock_storage_adapter):
         """Test successful retrieval of circuit breaker status."""
         mock_conn = mock_storage_adapter._get_connection.return_value
-        mock_execute = Mock()
-        mock_conn.execute = mock_execute
+        mock_cursor = mock_conn.cursor.return_value
         
-        mock_error_result = Mock()
-        mock_error_result.fetchone.return_value = (5,)
-        
-        mock_total_result = Mock()
-        mock_total_result.fetchone.return_value = (100,)
-        
-        mock_execute.side_effect = [mock_error_result, mock_total_result]
+        mock_cursor.fetchone.side_effect = [(5,), (100,)]  # Error count, then total count
         
         response = client.get("/api/circuit-breaker/status")
         
@@ -73,16 +69,9 @@ class TestCircuitBreakerStatusEndpoint:
     def test_get_circuit_breaker_status_open(self, client, mock_storage_adapter):
         """Test circuit breaker status when open (high failure rate)."""
         mock_conn = mock_storage_adapter._get_connection.return_value
-        mock_execute = Mock()
-        mock_conn.execute = mock_execute
+        mock_cursor = mock_conn.cursor.return_value
         
-        mock_error_result = Mock()
-        mock_error_result.fetchone.return_value = (60,)
-        
-        mock_total_result = Mock()
-        mock_total_result.fetchone.return_value = (100,)
-        
-        mock_execute.side_effect = [mock_error_result, mock_total_result]
+        mock_cursor.fetchone.side_effect = [(60,), (100,)]  # Error count, then total count
         
         response = client.get("/api/circuit-breaker/status")
         
@@ -96,16 +85,9 @@ class TestCircuitBreakerStatusEndpoint:
     def test_get_circuit_breaker_status_closed(self, client, mock_storage_adapter):
         """Test circuit breaker status when closed (low failure rate)."""
         mock_conn = mock_storage_adapter._get_connection.return_value
-        mock_execute = Mock()
-        mock_conn.execute = mock_execute
+        mock_cursor = mock_conn.cursor.return_value
         
-        mock_error_result = Mock()
-        mock_error_result.fetchone.return_value = (5,)
-        
-        mock_total_result = Mock()
-        mock_total_result.fetchone.return_value = (100,)
-        
-        mock_execute.side_effect = [mock_error_result, mock_total_result]
+        mock_cursor.fetchone.side_effect = [(5,), (100,)]  # Error count, then total count
         
         response = client.get("/api/circuit-breaker/status")
         
@@ -154,7 +136,8 @@ class TestCircuitBreakerStatusEndpoint:
     def test_get_circuit_breaker_status_query_error(self, client, mock_storage_adapter):
         """Test circuit breaker status when query fails."""
         mock_conn = mock_storage_adapter._get_connection.return_value
-        mock_conn.execute.side_effect = Exception("Query failed")
+        mock_cursor = mock_conn.cursor.return_value
+        mock_cursor.execute.side_effect = Exception("Query failed")
         
         response = client.get("/api/circuit-breaker/status")
         

@@ -21,6 +21,8 @@ import logging
 import uuid
 from pathlib import Path
 from typing import Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed, Future
+import threading
 
 from src.infrastructure.settings import settings
 from src.infrastructure.config_manager import get_database_config
@@ -110,6 +112,29 @@ def process_ingestion(
     redaction_logger.set_ingestion_id(ingestion_id)
     logger.info(f"Ingestion ID: {ingestion_id}")
     
+    # Initialize asynchronous redaction log flusher (background thread)
+    # This allows batch processing to continue while logs are flushed
+    flush_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="redaction-flusher")
+    pending_flush_futures = []  # Track pending flushes for final wait
+    flush_lock = threading.Lock()  # Thread-safe access to redaction logger
+    
+    def flush_redaction_logs_async(storage_adapter: StoragePort, logs_to_flush: list[dict]) -> None:
+        """Flush redaction logs asynchronously in background thread.
+        
+        Parameters:
+            storage_adapter: Storage adapter instance
+            logs_to_flush: List of redaction log dictionaries to flush
+        """
+        try:
+            if hasattr(storage_adapter, 'flush_redaction_logs') and logs_to_flush:
+                flush_result = storage_adapter.flush_redaction_logs(logs_to_flush)
+                if flush_result.is_success():
+                    logger.debug(f"Flushed {flush_result.value} redaction logs to storage (async)")
+                else:
+                    logger.warning(f"Failed to flush redaction logs (async): {flush_result.error}")
+        except Exception as e:
+            logger.error(f"Error flushing redaction logs asynchronously: {e}", exc_info=True)
+    
     # Initialize circuit breaker if enabled
     circuit_breaker = None
     if settings.circuit_breaker_enabled:
@@ -128,6 +153,13 @@ def process_ingestion(
     # Track chunk completion for periodic redaction log flushing
     # For JSON ingestion: chunk = patients + encounters + observations
     chunk_tables_persisted = set()
+    
+    # Collect DataFrames for parallel persistence (Strategy 1: Parallel Table Persistence)
+    chunk_dataframes = {
+        'patients': None,
+        'encounters': None,
+        'observations': None
+    }
     
     logger.info(f"Starting ingestion from: {source}")
     
@@ -171,37 +203,115 @@ def process_ingestion(
                             failure_count += len(df)
                             continue
                         
-                        persist_result = storage.persist_dataframe(df, table_name)
-                        if persist_result.is_success():
-                            success_count += persist_result.value
-                            logger.info(f"Persisted {persist_result.value} rows to {table_name}")
+                        # Store DataFrame for parallel persistence
+                        chunk_dataframes[table_name] = df
+                        
+                        # Check if we have all 3 DataFrames for a complete chunk
+                        # For JSON ingestion: chunk = patients + encounters + observations
+                        # Check that all values are not None (can't use all() directly on DataFrames)
+                        if all(df is not None for df in chunk_dataframes.values()):
+                            # Persist tables in order to respect foreign key constraints:
+                            # 1. Patients first (no dependencies)
+                            # 2. Encounters and observations in parallel (both depend on patients)
+                            logger.info(
+                                f"Persisting complete chunk: "
+                                f"{len(chunk_dataframes['patients'])} patients, "
+                                f"{len(chunk_dataframes['encounters'])} encounters, "
+                                f"{len(chunk_dataframes['observations'])} observations"
+                            )
                             
-                            # Track that we've persisted this table
-                            chunk_tables_persisted.add(table_name)
-                            
-                            # Flush redaction logs after completing a full chunk
-                            # For JSON: chunk = patients + encounters + observations
-                            # After observations are persisted, we've completed a chunk
-                            if table_name == 'observations' and hasattr(storage, 'flush_redaction_logs'):
-                                redaction_logs = redaction_logger.get_logs()
-                                if redaction_logs:
-                                    flush_result = storage.flush_redaction_logs(redaction_logs)
-                                    if flush_result.is_success():
-                                        logger.debug(
-                                            f"Flushed {flush_result.value} redaction logs to storage "
-                                            f"(chunk completed: {', '.join(chunk_tables_persisted)})"
-                                        )
-                                        # Clear logs after successful flush to avoid duplicates
-                                        redaction_logger.clear_logs()
-                                    else:
-                                        logger.warning(
-                                            f"Failed to flush redaction logs: {flush_result.error}"
-                                        )
-                                # Reset chunk tracking for next chunk
+                            # Step 1: Persist patients first (required for FK constraints)
+                            patients_result = storage.persist_dataframe(
+                                chunk_dataframes['patients'],
+                                'patients'
+                            )
+                            if patients_result.is_success():
+                                success_count += patients_result.value
+                                logger.info(
+                                    f"Persisted {patients_result.value} rows to patients"
+                                )
+                                chunk_tables_persisted.add('patients')
+                            else:
+                                failure_count += len(chunk_dataframes['patients'])
+                                logger.error(f"Failed to persist patients: {patients_result.error}")
+                                # Skip rest of chunk if patients failed
+                                chunk_dataframes = {
+                                    'patients': None,
+                                    'encounters': None,
+                                    'observations': None
+                                }
                                 chunk_tables_persisted.clear()
+                                continue
+                            
+                            # Step 2: Persist encounters and observations in parallel
+                            # (both depend on patients, but are independent of each other)
+                            with ThreadPoolExecutor(max_workers=2) as executor:
+                                futures = {
+                                    executor.submit(
+                                        storage.persist_dataframe,
+                                        chunk_dataframes[table],
+                                        table
+                                    ): (chunk_dataframes[table], table)
+                                    for table in ['encounters', 'observations']
+                                    if chunk_dataframes[table] is not None
+                                }
+                                
+                                # Process results as they complete
+                                for future in as_completed(futures):
+                                    df_persisted, table_name_persisted = futures[future]
+                                    try:
+                                        persist_result = future.result()
+                                        if persist_result.is_success():
+                                            success_count += persist_result.value
+                                            logger.info(
+                                                f"Persisted {persist_result.value} rows to {table_name_persisted} "
+                                                f"(parallel)"
+                                            )
+                                            chunk_tables_persisted.add(table_name_persisted)
+                                        else:
+                                            failure_count += len(df_persisted)
+                                            logger.error(
+                                                f"Failed to persist {table_name_persisted}: {persist_result.error}"
+                                            )
+                                    except Exception as e:
+                                        logger.error(
+                                            f"Exception persisting {table_name_persisted}: {e}",
+                                            exc_info=True
+                                        )
+                                        failure_count += len(df_persisted)
+                            
+                            # Flush redaction logs asynchronously after completing a full chunk
+                            # This doesn't block chunk processing - flush happens in background
+                            if hasattr(storage, 'flush_redaction_logs'):
+                                with flush_lock:
+                                    redaction_logs = redaction_logger.get_logs()
+                                    if redaction_logs:
+                                        # Copy logs for async flush (thread-safe)
+                                        logs_copy = redaction_logs.copy()
+                                        # Clear logs immediately to avoid duplicates
+                                        redaction_logger.clear_logs()
+                                        
+                                        # Submit async flush task
+                                        future = flush_executor.submit(
+                                            flush_redaction_logs_async,
+                                            storage,
+                                            logs_copy
+                                        )
+                                        pending_flush_futures.append(future)
+                            
+                            # Reset chunk tracking for next chunk
+                            chunk_dataframes = {
+                                'patients': None,
+                                'encounters': None,
+                                'observations': None
+                            }
+                            chunk_tables_persisted.clear()
                         else:
-                            failure_count += len(df)
-                            logger.error(f"Failed to persist DataFrame: {persist_result.error}")
+                            # Not a complete chunk yet, wait for more DataFrames
+                            logger.debug(
+                                f"Collected {table_name} DataFrame, waiting for complete chunk. "
+                                f"Have: {[k for k, v in chunk_dataframes.items() if v is not None]}"
+                            )
                     
                     # Handle GoldenRecord results (XML row-by-row processing)
                     else:
@@ -215,23 +325,24 @@ def process_ingestion(
                                 success_count += len(batch_records)
                                 logger.info(f"Persisted batch of {len(batch_records)} records")
                                 
-                                # Flush redaction logs periodically for XML ingestion
-                                # Flush after each batch to keep dashboard updated
+                                # Flush redaction logs asynchronously for XML ingestion
+                                # This doesn't block batch processing - flush happens in background
                                 if hasattr(storage, 'flush_redaction_logs'):
-                                    redaction_logs = redaction_logger.get_logs()
-                                    if redaction_logs:
-                                        flush_result = storage.flush_redaction_logs(redaction_logs)
-                                        if flush_result.is_success():
-                                            logger.debug(
-                                                f"Flushed {flush_result.value} redaction logs to storage "
-                                                f"(batch of {len(batch_records)} records)"
-                                            )
-                                            # Clear logs after successful flush to avoid duplicates
+                                    with flush_lock:
+                                        redaction_logs = redaction_logger.get_logs()
+                                        if redaction_logs:
+                                            # Copy logs for async flush (thread-safe)
+                                            logs_copy = redaction_logs.copy()
+                                            # Clear logs immediately to avoid duplicates
                                             redaction_logger.clear_logs()
-                                        else:
-                                            logger.warning(
-                                                f"Failed to flush redaction logs: {flush_result.error}"
+                                            
+                                            # Submit async flush task
+                                            future = flush_executor.submit(
+                                                flush_redaction_logs_async,
+                                                storage,
+                                                logs_copy
                                             )
+                                            pending_flush_futures.append(future)
                             else:
                                 failure_count += len(batch_records)
                                 logger.error(f"Failed to persist batch: {persist_result.error}")
@@ -244,7 +355,7 @@ def process_ingestion(
                     )
                     # Note: Circuit breaker is already updated at line 141 via record_result(result)
             
-            # Persist remaining records
+            # Persist remaining records (XML ingestion)
             if batch_records:
                 persist_result = storage.persist_batch(batch_records)
                 if persist_result.is_success():
@@ -253,6 +364,22 @@ def process_ingestion(
                 else:
                     failure_count += len(batch_records)
                     logger.error(f"Failed to persist final batch: {persist_result.error}")
+            
+            # Persist any remaining DataFrames (JSON ingestion - incomplete chunk)
+            remaining_tables = [table for table, df in chunk_dataframes.items() if df is not None]
+            if remaining_tables:
+                logger.info(
+                    f"Persisting remaining incomplete chunk: {', '.join(remaining_tables)}"
+                )
+                for table_name in remaining_tables:
+                    df = chunk_dataframes[table_name]
+                    persist_result = storage.persist_dataframe(df, table_name)
+                    if persist_result.is_success():
+                        success_count += persist_result.value
+                        logger.info(f"Persisted {persist_result.value} rows to {table_name}")
+                    else:
+                        failure_count += len(df)
+                        logger.error(f"Failed to persist {table_name}: {persist_result.error}")
         
         except KeyboardInterrupt:
             logger.warning("Ingestion interrupted by user")
@@ -264,23 +391,37 @@ def process_ingestion(
                 if persist_result.is_success():
                     success_count += len(batch_records)
     
-    # Flush any remaining redaction logs to storage (final flush)
-    # Note: Most logs should have been flushed periodically during ingestion,
-    # but this ensures we don't miss any logs from the final batch
+    # Wait for all pending async flushes to complete, then flush any remaining logs
+    logger.info("Waiting for pending redaction log flushes to complete...")
+    if pending_flush_futures:
+        # Wait for all pending flushes (with timeout to prevent hanging)
+        for future in pending_flush_futures:
+            try:
+                future.result(timeout=30)  # 30 second timeout per flush
+            except Exception as e:
+                logger.warning(f"Pending redaction log flush failed: {e}")
+    
+    # Flush any remaining redaction logs synchronously (final flush)
+    # This ensures we don't miss any logs from the final batch
     logger.info("Flushing remaining redaction logs to storage...")
-    redaction_logs = redaction_logger.get_logs()
-    if redaction_logs and hasattr(storage, 'flush_redaction_logs'):
-        flush_result = storage.flush_redaction_logs(redaction_logs)
-        if flush_result.is_success():
-            logger.info(f"Flushed {flush_result.value} remaining redaction logs to storage")
-            redaction_logger.clear_logs()
+    with flush_lock:
+        redaction_logs = redaction_logger.get_logs()
+        if redaction_logs and hasattr(storage, 'flush_redaction_logs'):
+            flush_result = storage.flush_redaction_logs(redaction_logs)
+            if flush_result.is_success():
+                logger.info(f"Flushed {flush_result.value} remaining redaction logs to storage")
+                redaction_logger.clear_logs()
+            else:
+                logger.warning(f"Failed to flush remaining redaction logs: {flush_result.error}")
         else:
-            logger.warning(f"Failed to flush remaining redaction logs: {flush_result.error}")
-    else:
-        if not redaction_logs:
-            logger.debug("No remaining redaction logs to flush (already flushed during ingestion)")
-        else:
-            logger.warning("Storage adapter does not support flush_redaction_logs")
+            if not redaction_logs:
+                logger.debug("No remaining redaction logs to flush (already flushed during ingestion)")
+            else:
+                logger.warning("Storage adapter does not support flush_redaction_logs")
+    
+    # Shutdown the flush executor
+    flush_executor.shutdown(wait=True)
+    logger.debug("Redaction log flusher thread pool shut down")
     
     return success_count, failure_count, ingestion_id
 

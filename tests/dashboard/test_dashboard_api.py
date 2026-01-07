@@ -250,16 +250,16 @@ class TestAuditEndpoints:
         adapter = Mock()
         adapter.initialize_schema.return_value = Result.success_result(None)
         
-        # Mock connection
+        # Mock connection with cursor for PostgreSQL compatibility
         mock_conn = Mock()
+        mock_cursor = Mock()
+        mock_conn.cursor.return_value = mock_cursor
         adapter._get_connection = Mock(return_value=mock_conn)
+        adapter.connection_params = {}  # Indicates PostgreSQL adapter
         
-        # Mock query results
-        mock_count_result = Mock()
-        mock_count_result.fetchone.return_value = (0,)
-        mock_data_result = Mock()
-        mock_data_result.fetchall.return_value = []
-        mock_conn.execute.side_effect = [mock_count_result, mock_data_result]
+        # Set up default cursor responses
+        mock_cursor.fetchone.side_effect = [(0,)]  # Default count
+        mock_cursor.fetchall.return_value = []  # Default data
         
         return adapter
     
@@ -514,32 +514,16 @@ class TestResponseFormat:
         mock_adapter.db_config.db_type = "duckdb"  # String, not Mock
         mock_adapter.db_config.db_path = ":memory:"
         
+        # Mock connection with cursor for PostgreSQL compatibility
         mock_conn = Mock()
+        mock_cursor = Mock()
+        mock_conn.cursor.return_value = mock_cursor
         mock_adapter._get_connection = Mock(return_value=mock_conn)
+        mock_adapter.connection_params = {}  # Indicates PostgreSQL adapter
         
-        # Mock query results - need separate mocks for each query type
-        # Redaction logs needs: count (fetchone), summary (fetchall), data (fetchall)
-        mock_count_result = Mock()
-        mock_count_result.fetchone.return_value = (0,)
-        mock_summary_result = Mock()
-        mock_summary_result.fetchall.return_value = []
-        mock_data_result = Mock()
-        mock_data_result.fetchall.return_value = []
-        
-        # Track call count to return correct mock for each query
-        call_count = [0]
-        
-        def execute_side_effect(*args, **kwargs):
-            query = args[0] if args else ""
-            # For redaction logs: count, summary, data (in that order)
-            if "GROUP BY" in query:
-                return mock_summary_result
-            elif "COUNT(*)" in query or "SELECT COUNT" in query:
-                return mock_count_result
-            else:
-                return mock_data_result
-        
-        mock_conn.execute.side_effect = execute_side_effect
+        # Set up default cursor responses (use return_value for repeated calls)
+        mock_cursor.fetchone.return_value = (0,)  # Default count (can be called multiple times)
+        mock_cursor.fetchall.return_value = []  # Default data
         
         app.dependency_overrides[get_storage_adapter] = lambda: mock_adapter
         

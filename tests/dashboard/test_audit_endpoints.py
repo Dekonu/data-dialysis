@@ -18,9 +18,13 @@ def mock_storage_adapter():
     adapter = Mock()
     adapter.initialize_schema.return_value = Result.success_result(None)
     
-    # Mock connection
+    # Mock connection with cursor for PostgreSQL compatibility
+    # get_db_connection wraps connections in ConnectionWrapper which uses cursors
     mock_conn = Mock()
+    mock_cursor = Mock()
+    mock_conn.cursor.return_value = mock_cursor
     adapter._get_connection = Mock(return_value=mock_conn)
+    adapter.connection_params = {}  # Indicates PostgreSQL adapter
     
     return adapter
 
@@ -46,18 +50,14 @@ class TestAuditLogsEndpoint:
     
     def test_get_audit_logs_success(self, client, mock_storage_adapter):
         """Test successful retrieval of audit logs."""
-        # Mock connection and execute results
+        # Mock connection and cursor (ConnectionWrapper uses cursor for PostgreSQL)
         mock_conn = mock_storage_adapter._get_connection.return_value
-        mock_execute = Mock()
-        mock_conn.execute = mock_execute
+        mock_cursor = mock_conn.cursor.return_value
         
-        # Mock count query result
-        mock_count_result = Mock()
-        mock_count_result.fetchone.return_value = (5,)
-        
-        # Mock data query result
-        mock_data_result = Mock()
-        mock_data_result.fetchall.return_value = [
+        # Set up side effect for cursor.execute calls
+        # ConnectionWrapper calls cursor() then executes on cursor
+        mock_cursor.fetchone.side_effect = [(5,)]  # Count query
+        mock_cursor.fetchall.return_value = [  # Data query
             (
                 "audit-1",
                 "BULK_PERSISTENCE",
@@ -66,7 +66,9 @@ class TestAuditLogsEndpoint:
                 "hash-1",
                 '{"key": "value"}',
                 "csv_adapter",
-                "INFO"
+                "INFO",
+                None,  # table_name
+                None   # row_count
             ),
             (
                 "audit-2",
@@ -76,12 +78,11 @@ class TestAuditLogsEndpoint:
                 "hash-2",
                 None,
                 "json_adapter",
-                "WARNING"
+                "WARNING",
+                None,  # table_name
+                None   # row_count
             )
         ]
-        
-        # Set up side effect for execute calls
-        mock_execute.side_effect = [mock_count_result, mock_data_result]
         
         response = client.get("/api/audit-logs?limit=10&offset=0")
         
@@ -97,14 +98,10 @@ class TestAuditLogsEndpoint:
     def test_get_audit_logs_with_filters(self, client, mock_storage_adapter):
         """Test audit logs endpoint with filters."""
         mock_conn = mock_storage_adapter._get_connection.return_value
-        mock_execute = Mock()
-        mock_conn.execute = mock_execute
+        mock_cursor = mock_conn.cursor.return_value
         
-        mock_count_result = Mock()
-        mock_count_result.fetchone.return_value = (2,)
-        
-        mock_data_result = Mock()
-        mock_data_result.fetchall.return_value = [
+        mock_cursor.fetchone.side_effect = [(2,)]
+        mock_cursor.fetchall.return_value = [
             (
                 "audit-1",
                 "REDACTION",
@@ -113,11 +110,11 @@ class TestAuditLogsEndpoint:
                 "hash-1",
                 None,
                 "csv_adapter",
-                "ERROR"
+                "ERROR",
+                None,  # table_name
+                None   # row_count
             )
         ]
-        
-        mock_execute.side_effect = [mock_count_result, mock_data_result]
         
         response = client.get(
             "/api/audit-logs?"
@@ -140,14 +137,10 @@ class TestAuditLogsEndpoint:
         start_date = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
         
         mock_conn = mock_storage_adapter._get_connection.return_value
-        mock_execute = Mock()
-        mock_conn.execute = mock_execute
+        mock_cursor = mock_conn.cursor.return_value
         
-        mock_count_result = Mock()
-        mock_count_result.fetchone.return_value = (1,)
-        
-        mock_data_result = Mock()
-        mock_data_result.fetchall.return_value = [
+        mock_cursor.fetchone.side_effect = [(1,)]
+        mock_cursor.fetchall.return_value = [
             (
                 "audit-1",
                 "BULK_PERSISTENCE",
@@ -156,11 +149,11 @@ class TestAuditLogsEndpoint:
                 "hash-1",
                 None,
                 "csv_adapter",
-                "INFO"
+                "INFO",
+                None,  # table_name
+                None   # row_count
             )
         ]
-        
-        mock_execute.side_effect = [mock_count_result, mock_data_result]
         
         response = client.get(
             f"/api/audit-logs?"
@@ -186,16 +179,10 @@ class TestAuditLogsEndpoint:
     def test_get_audit_logs_pagination(self, client, mock_storage_adapter):
         """Test audit logs pagination."""
         mock_conn = mock_storage_adapter._get_connection.return_value
-        mock_execute = Mock()
-        mock_conn.execute = mock_execute
+        mock_cursor = mock_conn.cursor.return_value
         
-        mock_count_result = Mock()
-        mock_count_result.fetchone.return_value = (100,)
-        
-        mock_data_result = Mock()
-        mock_data_result.fetchall.return_value = []  # Empty page
-        
-        mock_execute.side_effect = [mock_count_result, mock_data_result]
+        mock_cursor.fetchone.side_effect = [(100,)]
+        mock_cursor.fetchall.return_value = []  # Empty page
         
         response = client.get("/api/audit-logs?limit=10&offset=90")
         
@@ -208,7 +195,8 @@ class TestAuditLogsEndpoint:
     def test_get_audit_logs_database_error(self, client, mock_storage_adapter):
         """Test audit logs endpoint with database error."""
         mock_conn = mock_storage_adapter._get_connection.return_value
-        mock_conn.execute.side_effect = Exception("Database error")
+        mock_cursor = mock_conn.cursor.return_value
+        mock_cursor.execute.side_effect = Exception("Database error")
         
         response = client.get("/api/audit-logs")
         
@@ -217,16 +205,10 @@ class TestAuditLogsEndpoint:
     def test_get_audit_logs_empty_result(self, client, mock_storage_adapter):
         """Test audit logs endpoint with no results."""
         mock_conn = mock_storage_adapter._get_connection.return_value
-        mock_execute = Mock()
-        mock_conn.execute = mock_execute
+        mock_cursor = mock_conn.cursor.return_value
         
-        mock_count_result = Mock()
-        mock_count_result.fetchone.return_value = (0,)
-        
-        mock_data_result = Mock()
-        mock_data_result.fetchall.return_value = []
-        
-        mock_execute.side_effect = [mock_count_result, mock_data_result]
+        mock_cursor.fetchone.side_effect = [(0,)]
+        mock_cursor.fetchall.return_value = []
         
         response = client.get("/api/audit-logs")
         
@@ -242,23 +224,16 @@ class TestRedactionLogsEndpoint:
     def test_get_redaction_logs_success(self, client, mock_storage_adapter):
         """Test successful retrieval of redaction logs."""
         mock_conn = mock_storage_adapter._get_connection.return_value
-        mock_execute = Mock()
-        mock_conn.execute = mock_execute
+        mock_cursor = mock_conn.cursor.return_value
         
-        # Summary query result
-        mock_summary_result = Mock()
-        mock_summary_result.fetchall.return_value = [
-            (5, "ssn", "regex_ssn", "csv_adapter"),
-            (3, "dob", "regex_dob", "json_adapter")
-        ]
-        
-        # Count query result
-        mock_count_result = Mock()
-        mock_count_result.fetchone.return_value = (8,)
-        
-        # Data query result
-        mock_data_result = Mock()
-        mock_data_result.fetchall.return_value = [
+        # Set up side effects for multiple queries (count, summary, data)
+        mock_cursor.fetchone.side_effect = [(8,)]  # Count query
+        mock_cursor.fetchall.side_effect = [
+            [  # Summary query
+                (5, "ssn", "regex_ssn", "csv_adapter"),
+                (3, "dob", "regex_dob", "json_adapter")
+            ],
+            [  # Data query
             (
                 "log-1",
                 "ssn",
@@ -283,10 +258,8 @@ class TestRedactionLogsEndpoint:
                 "****-**-**",
                 10
             )
+            ]
         ]
-        
-        # Order matches service: count (fetchone), summary (fetchall), data (fetchall)
-        mock_execute.side_effect = [mock_count_result, mock_summary_result, mock_data_result]
         
         response = client.get("/api/redaction-logs?time_range=24h&limit=10")
         
@@ -296,30 +269,25 @@ class TestRedactionLogsEndpoint:
         assert "pagination" in data
         assert "summary" in data
         assert len(data["logs"]) == 2
-        assert data["summary"]["total_redactions"] == 8
+        assert data["summary"]["total"] == 8
         assert "ssn" in data["summary"]["by_field"]
         assert "dob" in data["summary"]["by_field"]
     
     def test_get_redaction_logs_with_filters(self, client, mock_storage_adapter):
         """Test redaction logs endpoint with filters."""
         mock_conn = mock_storage_adapter._get_connection.return_value
-        mock_execute = Mock()
-        mock_conn.execute = mock_execute
+        mock_cursor = mock_conn.cursor.return_value
         
-        mock_summary_result = Mock()
-        mock_summary_result.fetchall.return_value = [
-            (2, "ssn", "regex_ssn", "csv_adapter")
-        ]
-        
-        mock_count_result = Mock()
-        mock_count_result.fetchone.return_value = (2,)
-        
-        mock_data_result = Mock()
-        mock_data_result.fetchall.return_value = [
-            (
-                "log-1",
-                "ssn",
-                "hash-1",
+        mock_cursor.fetchone.side_effect = [(2,)]  # Count query
+        mock_cursor.fetchall.side_effect = [
+            [  # Summary query
+                (2, "ssn", "regex_ssn", "csv_adapter")
+            ],
+            [  # Data query
+                (
+                    "log-1",
+                    "ssn",
+                    "hash-1",
                 datetime.now(timezone.utc),
                 "regex_ssn",
                 "record-1",
@@ -328,10 +296,8 @@ class TestRedactionLogsEndpoint:
                 "***-**-****",
                 11
             )
+            ]
         ]
-        
-        # Order matches service: count (fetchone), summary (fetchall), data (fetchall)
-        mock_execute.side_effect = [mock_count_result, mock_summary_result, mock_data_result]
         
         response = client.get(
             "/api/redaction-logs?"
@@ -355,7 +321,8 @@ class TestRedactionLogsEndpoint:
     def test_get_redaction_logs_database_error(self, client, mock_storage_adapter):
         """Test redaction logs endpoint with database error."""
         mock_conn = mock_storage_adapter._get_connection.return_value
-        mock_conn.execute.side_effect = Exception("Database error")
+        mock_cursor = mock_conn.cursor.return_value
+        mock_cursor.execute.side_effect = Exception("Database error")
         
         response = client.get("/api/redaction-logs")
         
@@ -368,14 +335,10 @@ class TestExportAuditLogsEndpoint:
     def test_export_audit_logs_json(self, client, mock_storage_adapter):
         """Test export audit logs as JSON."""
         mock_conn = mock_storage_adapter._get_connection.return_value
-        mock_execute = Mock()
-        mock_conn.execute = mock_execute
+        mock_cursor = mock_conn.cursor.return_value
         
-        mock_count_result = Mock()
-        mock_count_result.fetchone.return_value = (2,)
-        
-        mock_data_result = Mock()
-        mock_data_result.fetchall.return_value = [
+        mock_cursor.fetchone.side_effect = [(2,)]
+        mock_cursor.fetchall.return_value = [
             (
                 "audit-1",
                 "BULK_PERSISTENCE",
@@ -384,7 +347,9 @@ class TestExportAuditLogsEndpoint:
                 "hash-1",
                 '{"key": "value"}',
                 "csv_adapter",
-                "INFO"
+                "INFO",
+                None,  # table_name
+                None   # row_count
             ),
             (
                 "audit-2",
@@ -394,11 +359,11 @@ class TestExportAuditLogsEndpoint:
                 "hash-2",
                 None,
                 "json_adapter",
-                "WARNING"
+                "WARNING",
+                None,  # table_name
+                None   # row_count
             )
         ]
-        
-        mock_execute.side_effect = [mock_count_result, mock_data_result]
         
         response = client.get("/api/audit-logs/export?format=json")
         
@@ -413,14 +378,10 @@ class TestExportAuditLogsEndpoint:
     def test_export_audit_logs_csv(self, client, mock_storage_adapter):
         """Test export audit logs as CSV."""
         mock_conn = mock_storage_adapter._get_connection.return_value
-        mock_execute = Mock()
-        mock_conn.execute = mock_execute
+        mock_cursor = mock_conn.cursor.return_value
         
-        mock_count_result = Mock()
-        mock_count_result.fetchone.return_value = (1,)
-        
-        mock_data_result = Mock()
-        mock_data_result.fetchall.return_value = [
+        mock_cursor.fetchone.side_effect = [(1,)]
+        mock_cursor.fetchall.return_value = [
             (
                 "audit-1",
                 "BULK_PERSISTENCE",
@@ -429,11 +390,11 @@ class TestExportAuditLogsEndpoint:
                 "hash-1",
                 None,
                 "csv_adapter",
-                "INFO"
+                "INFO",
+                None,  # table_name
+                None   # row_count
             )
         ]
-        
-        mock_execute.side_effect = [mock_count_result, mock_data_result]
         
         response = client.get("/api/audit-logs/export?format=csv")
         
@@ -455,14 +416,10 @@ class TestExportAuditLogsEndpoint:
     def test_export_audit_logs_with_filters(self, client, mock_storage_adapter):
         """Test export audit logs with filters."""
         mock_conn = mock_storage_adapter._get_connection.return_value
-        mock_execute = Mock()
-        mock_conn.execute = mock_execute
+        mock_cursor = mock_conn.cursor.return_value
         
-        mock_count_result = Mock()
-        mock_count_result.fetchone.return_value = (1,)
-        
-        mock_data_result = Mock()
-        mock_data_result.fetchall.return_value = [
+        mock_cursor.fetchone.side_effect = [(1,)]
+        mock_cursor.fetchall.return_value = [
             (
                 "audit-1",
                 "REDACTION",
@@ -471,11 +428,11 @@ class TestExportAuditLogsEndpoint:
                 "hash-1",
                 None,
                 "csv_adapter",
-                "ERROR"
+                "ERROR",
+                None,  # table_name
+                None   # row_count
             )
         ]
-        
-        mock_execute.side_effect = [mock_count_result, mock_data_result]
         
         response = client.get(
             "/api/audit-logs/export?"

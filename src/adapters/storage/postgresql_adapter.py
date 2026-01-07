@@ -1028,9 +1028,224 @@ class PostgreSQLAdapter(StoragePort):
     def persist_dataframe(self, df: pd.DataFrame, table_name: str) -> Result[int]:
         """Persist a pandas DataFrame directly to a table.
         
+        Uses PostgreSQL COPY for large DataFrames without arrays (faster) or execute_values for others.
+        
         Parameters:
             df: Validated pandas DataFrame (PII already redacted)
             table_name: Target table name (e.g., 'patients', 'observations')
+        
+        Returns:
+            Result[int]: Number of rows persisted or error
+        """
+        if df.empty:
+            return Result.success_result(0)
+        
+        # Check if table has array columns - COPY CSV doesn't handle arrays well
+        array_columns = {
+            'patients': ['identifiers', 'given_names', 'name_prefix', 'name_suffix'],
+            'encounters': ['diagnosis_codes'],
+            'observations': []
+        }
+        table_array_cols = array_columns.get(table_name, [])
+        has_array_cols = any(col in df.columns for col in table_array_cols)
+        
+        # Use COPY for large DataFrames without arrays (10k+ rows)
+        # COPY is 2-3x faster than INSERT for bulk data, but arrays need special handling
+        if len(df) >= 10000 and not has_array_cols:
+            return self._persist_dataframe_copy(df, table_name)
+        else:
+            # Use INSERT for smaller batches or tables with arrays
+            return self._persist_dataframe_insert(df, table_name)
+    
+    def _persist_dataframe_copy(self, df: pd.DataFrame, table_name: str) -> Result[int]:
+        """Persist DataFrame using PostgreSQL COPY command (optimized for large batches).
+        
+        COPY is 2-3x faster than INSERT for bulk data operations.
+        
+        Parameters:
+            df: Validated pandas DataFrame (PII already redacted)
+            table_name: Target table name
+        
+        Returns:
+            Result[int]: Number of rows persisted or error
+        """
+        if df.empty:
+            return Result.success_result(0)
+        
+        conn = None
+        try:
+            if not self._initialized:
+                init_result = self.initialize_schema()
+                if not init_result.is_success():
+                    return init_result
+            
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            
+            # Define expected columns for each table
+            table_columns = {
+                'patients': [
+                    'patient_id', 'identifiers', 'family_name', 'given_names', 'name_prefix', 'name_suffix',
+                    'date_of_birth', 'gender', 'deceased', 'deceased_date', 'marital_status',
+                    'address_line1', 'address_line2', 'city', 'state', 'postal_code', 'country',
+                    'address_use', 'phone', 'email', 'fax', 'emergency_contact_name',
+                    'emergency_contact_relationship', 'emergency_contact_phone', 'language',
+                    'managing_organization', 'ingestion_timestamp', 'source_adapter', 'transformation_hash'
+                ],
+                'encounters': [
+                    'encounter_id', 'patient_id', 'status', 'class_code', 'type', 'service_type', 'priority',
+                    'period_start', 'period_end', 'length_minutes', 'reason_code', 'diagnosis_codes',
+                    'facility_name', 'location_address', 'participant_name', 'participant_role',
+                    'service_provider', 'ingestion_timestamp', 'source_adapter', 'transformation_hash'
+                ],
+                'observations': [
+                    'observation_id', 'patient_id', 'encounter_id', 'status', 'category', 'code',
+                    'effective_date', 'issued', 'performer_name', 'value', 'unit', 'interpretation',
+                    'body_site', 'method', 'device', 'reference_range', 'notes',
+                    'ingestion_timestamp', 'source_adapter', 'transformation_hash'
+                ]
+            }
+            
+            # Filter DataFrame to only include columns that exist in the table schema
+            expected_cols = table_columns.get(table_name, list(df.columns))
+            available_cols = [col for col in expected_cols if col in df.columns]
+            df_filtered = df[available_cols].copy()
+            
+            # Add required columns if missing
+            from datetime import datetime
+            source_adapter_value = 'bulk_ingestion'
+            if 'source_adapter' in df.columns and not df['source_adapter'].isna().all():
+                source_adapter_series = df['source_adapter'].dropna()
+                if len(source_adapter_series) > 0:
+                    source_adapter_value = str(source_adapter_series.iloc[0])
+            
+            required_columns = {
+                'ingestion_timestamp': datetime.now(),
+                'source_adapter': source_adapter_value,
+                'transformation_hash': None
+            }
+            
+            for col_name, default_value in required_columns.items():
+                if col_name in expected_cols and col_name not in df_filtered.columns:
+                    df_filtered[col_name] = default_value
+                    available_cols.append(col_name)
+            
+            # Prepare data for COPY
+            array_columns = {
+                'patients': ['identifiers', 'given_names', 'name_prefix', 'name_suffix'],
+                'encounters': ['diagnosis_codes'],
+                'observations': []
+            }
+            table_array_cols = array_columns.get(table_name, [])
+            
+            # Clean DataFrame
+            df_cleaned = DataFrameCleaner.prepare_for_database(
+                df_filtered,
+                array_columns=table_array_cols,
+                enum_columns=None,
+                convert_nat=True
+            )
+            
+            # Use COPY FROM STDIN with TEXT format (not CSV) for better NULL and array handling
+            # TEXT format handles NULLs and arrays more reliably than CSV
+            from io import StringIO
+            
+            buffer = StringIO()
+            
+            # Convert DataFrame to tuples for processing
+            values = DataFrameCleaner.convert_to_tuples(
+                df_cleaned,
+                handle_nat=True,
+                array_columns=set(table_array_cols)
+            )
+            
+            # Write rows in PostgreSQL COPY TEXT format
+            # TEXT format: tab-separated, \N for NULL, {value1,value2} for arrays
+            for row in values:
+                formatted_values = []
+                for idx, val in enumerate(row):
+                    col_name = df_cleaned.columns[idx]
+                    
+                    if val is None:
+                        # NULL value
+                        formatted_values.append('\\N')
+                    elif col_name in table_array_cols and isinstance(val, (list, tuple)):
+                        # Format array as PostgreSQL array: {value1,value2}
+                        if len(val) == 0:
+                            formatted_values.append('{}')
+                        else:
+                            # Escape array values and format as {value1,value2}
+                            escaped_values = []
+                            for v in val:
+                                if v is None:
+                                    escaped_values.append('NULL')
+                                else:
+                                    v_str = str(v)
+                                    # Escape backslashes, quotes, and commas for arrays
+                                    v_str = v_str.replace('\\', '\\\\').replace('"', '\\"')
+                                    escaped_values.append(v_str)
+                            formatted_values.append('{' + ','.join(escaped_values) + '}')
+                    else:
+                        # Regular value - convert to string
+                        val_str = str(val) if val is not None else '\\N'
+                        # Escape tabs and newlines for TEXT format
+                        val_str = val_str.replace('\t', '\\t').replace('\n', '\\n').replace('\r', '\\r')
+                        formatted_values.append(val_str)
+                
+                # Write tab-separated row
+                buffer.write('\t'.join(formatted_values) + '\n')
+            
+            buffer.seek(0)
+            
+            # Use COPY FROM STDIN with TEXT format (handles NULLs and arrays better)
+            columns_str = ', '.join(df_cleaned.columns)
+            copy_sql = f"COPY {table_name} ({columns_str}) FROM STDIN WITH (FORMAT text, NULL '\\N')"
+            
+            cursor.copy_expert(copy_sql, buffer)
+            
+            total_rows = len(df_cleaned)
+            conn.commit()
+            cursor.close()
+            
+            logger.info(f"Persisted {total_rows} rows to table '{table_name}' using COPY")
+            
+            # Log audit event
+            source_adapter = 'bulk_ingestion'
+            if 'source_adapter' in df.columns:
+                source_adapter_series = df['source_adapter'].dropna()
+                if len(source_adapter_series) > 0:
+                    source_adapter = str(source_adapter_series.iloc[0])
+            
+            self.log_audit_event(
+                event_type="BULK_PERSISTENCE",
+                record_id=None,
+                transformation_hash=None,
+                details={"source_adapter": source_adapter},
+                table_name=table_name,
+                row_count=total_rows,
+                source_adapter=source_adapter
+            )
+            
+            return Result.success_result(total_rows)
+            
+        except Exception as e:
+            if conn:
+                conn.rollback()
+            error_msg = f"Failed to persist DataFrame to {table_name} using COPY: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            # Fall back to INSERT method on COPY failure
+            logger.info(f"Falling back to INSERT method for {table_name}")
+            return self._persist_dataframe_insert(df, table_name)
+        finally:
+            if conn:
+                self._return_connection(conn)
+    
+    def _persist_dataframe_insert(self, df: pd.DataFrame, table_name: str) -> Result[int]:
+        """Persist DataFrame using INSERT with execute_values (for smaller batches).
+        
+        Parameters:
+            df: Validated pandas DataFrame (PII already redacted)
+            table_name: Target table name
         
         Returns:
             Result[int]: Number of rows persisted or error

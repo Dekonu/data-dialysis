@@ -445,9 +445,10 @@ class TestPostgresAdapterPersistBatch:
         assert len(result.value) == 2
         assert result.value == ["MRN001", "MRN001"]
         
-        # Verify commit was called (once for batch transaction)
-        # Note: persist_batch doesn't call log_audit_event, so only 1 commit
-        assert mock_psycopg2['conn'].commit.call_count == 1
+        # Verify commit was called
+        # persist_batch commits the batch transaction, then log_audit_event also commits
+        # So we expect 2 commits: one for the batch, one for the audit log
+        assert mock_psycopg2['conn'].commit.call_count == 2
     
     def test_persist_batch_empty_list(self, mock_psycopg2, postgres_adapter_with_config):
         """Test that empty batch returns success with empty list."""
