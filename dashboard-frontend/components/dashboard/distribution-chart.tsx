@@ -20,6 +20,7 @@ const COLORS = ['#0088FE', '#00C49F', '#FFBB28', '#FF8042', '#8884d8', '#82ca9d'
 export interface DistributionDataPoint {
   name: string;
   value: number;
+  [key: string]: string | number; // Index signature for Recharts compatibility
 }
 
 export interface DistributionChartProps {
