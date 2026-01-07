@@ -62,7 +62,7 @@ export function TimeSeriesChart({
             <YAxis tickFormatter={formatValue} style={{ fontSize: '12px' }} />
             <Tooltip
               labelFormatter={(label) => `Date: ${formatDate(label)}`}
-              formatter={(value: number) => formatValue(value)}
+              formatter={(value: number | undefined) => formatValue(value ?? 0)}
             />
             <Legend />
             <Line
