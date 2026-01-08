@@ -321,11 +321,14 @@ class JSONIngester(IngestionPort):
                             optimal_chunk_size = max(1000, min(optimal_chunk_size, 50000))
                             
                             if optimal_chunk_size != self.chunk_size:
+                                # Calculate expected total rows for this chunk size
+                                expected_total = optimal_chunk_size * total_per_patient
                                 logger.info(
                                     f"Adaptive chunk sizing activated: "
-                                    f"Initial chunk size: {self.initial_chunk_size}, "
-                                    f"Optimal chunk size: {optimal_chunk_size} "
+                                    f"Initial chunk size: {self.initial_chunk_size} patients, "
+                                    f"Optimal chunk size: {optimal_chunk_size} patients "
                                     f"(target: {self.target_total_rows} total rows, "
+                                    f"expected: ~{int(expected_total)} total rows per chunk, "
                                     f"ratios: {self.ratios['encounters_per_patient']:.2f} encounters/patient, "
                                     f"{self.ratios['observations_per_patient']:.2f} observations/patient)"
                                 )
@@ -334,9 +337,11 @@ class JSONIngester(IngestionPort):
                 # Log chunk statistics (including adaptive sizing info)
                 if self.ratios:
                     expected_total = num_valid * (1 + self.ratios['encounters_per_patient'] + self.ratios['observations_per_patient'])
+                    actual_total = num_valid + len(encounters_df) + len(observations_df)
                     logger.debug(
                         f"Chunk {chunk_count}: {num_valid} patients, {len(encounters_df)} encounters, "
-                        f"{len(observations_df)} observations (expected total: {expected_total:.0f})"
+                        f"{len(observations_df)} observations (expected total: {expected_total:.0f}, "
+                        f"actual total: {actual_total})"
                     )
                 
                 # Log failures if any

@@ -1,6 +1,6 @@
 # Architecture Overview
 
-This document provides a comprehensive overview of the Data-Dialysis architecture, design decisions, and patterns used throughout the codebase.
+This document provides a comprehensive overview of the Data-Dialysis architecture, design decisions, and patterns used throughout the codebase. It serves as a technical reference for understanding the system's structure, design rationale, and implementation approach.
 
 ## 🏗️ High-Level Architecture
 
@@ -381,7 +381,7 @@ The `ConfigManager` provides:
 - Validation
 - Default values
 
-## 📈 Scalability
+## 📈 Scalability & Performance
 
 ### Horizontal Scaling
 
@@ -395,16 +395,36 @@ The architecture supports horizontal scaling:
 
 Optimized for single-machine performance:
 
-1. **Streaming** - O(record_size) memory
-2. **Vectorization** - Efficient Pandas operations
-3. **Batch Processing** - Balanced throughput
+1. **Streaming** - O(record_size) memory complexity (validated with 100MB+ files)
+2. **Vectorization** - Efficient Pandas operations for batch processing
+3. **Batch Processing** - Balanced throughput with configurable batch sizes
+4. **Change Data Capture** - <10% overhead on ingestion throughput
+
+### Performance Characteristics
+
+- **Memory Efficiency**: O(record_size) memory usage with streaming architecture
+- **Throughput**: 1,400-5,000 records/sec depending on file size and format
+- **Scalability**: Handles files of arbitrary size without memory exhaustion
+- **CDC Overhead**: Field-level change tracking with minimal performance impact
+
+**See [docs/PERFORMANCE_BENCHMARKING.md](docs/PERFORMANCE_BENCHMARKING.md) for detailed performance analysis.**
+
+## 🔬 Research Contributions
+
+This architecture demonstrates several advanced software engineering practices:
+
+1. **Hexagonal Architecture** - Clean separation of concerns enabling high testability
+2. **Security-First Design** - Multi-layer defense mechanisms with formal threat modeling
+3. **Streaming Algorithms** - O(record_size) memory complexity for large file processing
+4. **Change Data Capture** - Encrypted raw data vault for accurate field-level change tracking
+5. **Compliance Architecture** - HIPAA/GDPR compliant with immutable audit trails
 
 ## 🔮 Future Enhancements
 
 Potential architectural improvements:
 
 1. **Message Queue Integration** - For distributed processing
-2. **Web API** - REST/GraphQL interface
+2. **Web API** - REST/GraphQL interface (dashboard API already implemented)
 3. **Real-time Processing** - Stream processing with Kafka
 4. **Multi-tenant Support** - Tenant isolation
 5. **Plugin System** - Custom adapters via plugins
@@ -418,5 +438,15 @@ Potential architectural improvements:
 
 ---
 
-**Last Updated:** January 2025
+## 📚 Related Documentation
+
+- **[THREAT_MODEL.md](../THREAT_MODEL.md)** - Comprehensive security analysis
+- **[docs/PERFORMANCE_BENCHMARKING.md](docs/PERFORMANCE_BENCHMARKING.md)** - Performance evaluation methodology
+- **[docs/XML_STREAMING_DESIGN.md](docs/XML_STREAMING_DESIGN.md)** - Streaming architecture details
+- **[docs/CHANGE_DATA_CAPTURE_PLAN.md](docs/CHANGE_DATA_CAPTURE_PLAN.md)** - CDC implementation
+- **[docs/RAW_DATA_VAULT_DESIGN.md](docs/RAW_DATA_VAULT_DESIGN.md)** - Encrypted raw data storage
+
+---
+
+**Last Updated:** January 2026
 

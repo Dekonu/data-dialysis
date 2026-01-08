@@ -2,7 +2,7 @@
 
 ## Executive Summary
 
-Data-Dialysis is a **self-securing data ingestion engine** designed to process clinical data from untrusted sources while maintaining HIPAA/GDPR compliance and preventing data poisoning attacks. This document outlines the threat model, attack vectors, and defensive mechanisms implemented in the system.
+Data-Dialysis is a **self-securing data ingestion engine** designed to process clinical data from untrusted sources while maintaining HIPAA/GDPR compliance and preventing data poisoning attacks. This document provides a comprehensive threat model analysis, detailing attack vectors, defensive mechanisms, and security architecture. This analysis demonstrates formal security engineering practices suitable for academic evaluation.
 
 ---
 
@@ -418,7 +418,14 @@ The system implements **multiple layers of defense**:
 
 ---
 
-**Last Updated:** 2025-01-XX  
-**Version:** 1.0.0  
-**Maintainer:** Data-Dialysis Security Team
+## 📚 Related Documentation
+
+- **[ARCHITECTURE.md](../ARCHITECTURE.md)** - System architecture and design patterns
+- **[docs/REDACTION_LOGGING.md](docs/REDACTION_LOGGING.md)** - PII redaction system design
+- **[docs/RAW_DATA_VAULT_DESIGN.md](docs/RAW_DATA_VAULT_DESIGN.md)** - Encrypted storage architecture
+
+---
+
+**Last Updated:** January 2026  
+**Version:** 1.0.0
 

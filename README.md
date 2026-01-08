@@ -12,9 +12,16 @@
 
 ---
 
-A **"Safety-First"** data pipeline designed to ingest disparate clinical-style datasets while automatically redacting PII (Personally Identifiable Information) and enforcing schema strictness before data ever touches a persistent database.
+## Abstract
 
-**🎯 Showcase Feature:** Processes **100MB+ XML files** with constant memory usage (~50-100MB peak) using streaming architecture - demonstrating production-ready scalability.
+Data-Dialysis is a **production-grade data ingestion system** implementing Hexagonal Architecture principles to process clinical and sensitive datasets with automatic PII (Personally Identifiable Information) redaction, schema validation, and comprehensive threat protection. The system demonstrates advanced software engineering practices including:
+
+- **Security-First Architecture**: Multi-layer defense mechanisms against XML attacks, injection, and resource exhaustion
+- **Scalable Processing**: Streaming architecture enabling O(record_size) memory usage for files of arbitrary size (validated with 100MB+ files)
+- **Change Data Capture**: Field-level change tracking with encrypted raw data vault for accurate audit trails
+- **Compliance-Ready**: HIPAA/GDPR compliant with immutable audit logs and encrypted PII storage
+
+**Key Technical Achievement:** Processes **100MB+ XML files** with constant memory usage (~50-100MB peak) using streaming architecture, demonstrating production-ready scalability and efficient resource utilization.
 
 **Key Features:**
 - 🔒 **Automatic PII Redaction** - HIPAA/GDPR compliant with audit trails
@@ -174,12 +181,20 @@ Database (DuckDB/PostgreSQL)
 
 ## 📖 Documentation
 
-- **[ARCHITECTURE.md](ARCHITECTURE.md)** - Comprehensive architecture overview and design decisions
-- **[THREAT_MODEL.md](THREAT_MODEL.md)** - Detailed threat model and security architecture
-- **[docs/XML_STREAMING_DESIGN.md](docs/XML_STREAMING_DESIGN.md)** - XML streaming implementation details
-- **[docs/REDACTION_LOGGING.md](docs/REDACTION_LOGGING.md)** - PII redaction and audit trail design
-- **[docs/CONFIG_MANAGER_DESIGN.md](docs/CONFIG_MANAGER_DESIGN.md)** - Configuration management
-- **[CONTRIBUTING.md](CONTRIBUTING.md)** - Guidelines for contributing to the project
+### Core Documentation
+
+- **[ARCHITECTURE.md](ARCHITECTURE.md)** - Comprehensive architecture overview, design patterns, and system structure
+- **[THREAT_MODEL.md](THREAT_MODEL.md)** - Detailed threat model, attack vectors, and defense mechanisms
+- **[docs/PERFORMANCE_BENCHMARKING.md](docs/PERFORMANCE_BENCHMARKING.md)** - Performance evaluation methodology and results
+- **[docs/README.md](docs/README.md)** - Detailed design documents and technical specifications
+
+### Design Documents
+
+- **[docs/XML_STREAMING_DESIGN.md](docs/XML_STREAMING_DESIGN.md)** - Streaming architecture for large file processing
+- **[docs/REDACTION_LOGGING.md](docs/REDACTION_LOGGING.md)** - PII redaction system and audit trail architecture
+- **[docs/CHANGE_DATA_CAPTURE_PLAN.md](docs/CHANGE_DATA_CAPTURE_PLAN.md)** - CDC implementation with field-level change tracking
+- **[docs/RAW_DATA_VAULT_DESIGN.md](docs/RAW_DATA_VAULT_DESIGN.md)** - Encrypted raw data storage for accurate change detection
+- **[docs/DASHBOARD_DESIGN.md](docs/DASHBOARD_DESIGN.md)** - Real-time monitoring dashboard architecture
 
 ---
 
@@ -239,36 +254,39 @@ For XML ingestion, create a JSON configuration file mapping XPath expressions to
 
 ### Large File Processing Capability
 
-**Clinical-Sieve can efficiently process files up to 100MB+ using streaming architecture:**
+The system efficiently processes files up to 100MB+ using streaming architecture, demonstrating production-ready scalability:
 
-- ✅ **100MB XML files** processed with constant memory usage
+- ✅ **100MB XML files** processed with constant memory usage (~50-100MB peak)
 - ✅ **Streaming parser** prevents memory exhaustion on large datasets
 - ✅ **Automatic mode selection** - uses streaming for files >100MB
-- ✅ **O(record_size) memory** - not O(file_size) - scales to any file size
+- ✅ **O(record_size) memory complexity** - not O(file_size) - scales to any file size
 
-This capability demonstrates production-ready data pipeline engineering, handling real-world clinical data volumes without resource exhaustion.
+This capability demonstrates advanced data pipeline engineering, handling real-world clinical data volumes without resource exhaustion.
 
-### Benchmarking
+### Performance Benchmarking
 
-Generate test files and benchmark performance:
+A comprehensive benchmarking suite provides quantitative performance evaluation:
 
 ```bash
 # Generate test XML files (1MB, 5MB, 10MB, 25MB, 50MB, 75MB, 100MB)
 python scripts/generate_xml_test_files.py
 
-# Run benchmarks (includes 100MB file)
+# Run comprehensive benchmarks
 python scripts/benchmark_xml_ingestion.py test_data/ xml_config.json --iterations 3
 
 # Or use CLI
 datadialysis benchmark test_data/ xml_config.json --iterations 3
 ```
 
-### Expected Performance
+**See [docs/PERFORMANCE_BENCHMARKING.md](docs/PERFORMANCE_BENCHMARKING.md) for detailed methodology and results.**
+
+### Performance Characteristics
 
 - **Small files (<10MB):** Traditional mode, ~2,000-5,000 records/sec
 - **Large files (100MB+):** Streaming mode, ~1,400-1,800 records/sec
 - **Memory usage:** O(record_size) with streaming, not O(file_size)
 - **100MB file processing:** Constant memory (~50-100MB peak) regardless of file size
+- **Change Data Capture:** <10% overhead on ingestion throughput
 
 ---
 
@@ -286,10 +304,11 @@ pytest tests/test_xml_ingestion.py -v
 ```
 
 **Test Coverage:**
-- ✅ 183 tests covering ingestion, validation, redaction
+- ✅ 170+ tests covering ingestion, validation, redaction, and CDC
 - ✅ Adversarial tests for security (XML attacks, injection attempts)
 - ✅ Property-based tests with Hypothesis
-- ✅ Integration tests with DuckDB
+- ✅ Integration tests with DuckDB and PostgreSQL
+- ✅ Unit tests for all adapters and domain services
 
 ---
 
@@ -329,14 +348,18 @@ for result in adapter.ingest("data/patients.csv"):
 
 ---
 
-## 🔒 Security Best Practices
+## 🔒 Security Architecture
 
-1. **Never disable security features** in production
-2. **Monitor circuit breaker statistics** for data quality issues
-3. **Review security reports** regularly for anomalies
-4. **Use environment variables** for sensitive configuration
-5. **Enable audit logging** for compliance requirements
-6. **Keep dependencies updated** (especially defusedxml, lxml)
+The system implements **defense-in-depth** security with multiple protection layers:
+
+1. **Input Sanitization** - File size limits, format validation, malformed data rejection
+2. **Secure Parsing** - defusedxml for XML attacks, streaming for memory safety
+3. **PII Redaction** - Automatic detection and redaction with audit trails
+4. **Schema Validation** - Strict Pydantic validation with fail-fast error handling
+5. **Circuit Breaker** - Quality gates prevent bad data ingestion
+6. **Secure Persistence** - Parameterized queries, transaction safety, audit logging
+
+**See [THREAT_MODEL.md](THREAT_MODEL.md) for comprehensive security analysis.**
 
 ---
 
@@ -370,6 +393,16 @@ See [LICENSE](LICENSE) file for details.
 
 ---
 
+## Research & Academic Context
+
+This project demonstrates advanced software engineering practices suitable for graduate-level computer science programs:
+
+- **Architectural Patterns**: Hexagonal Architecture (Ports & Adapters) for maintainability and testability
+- **Security Engineering**: Multi-layer threat protection with formal threat modeling
+- **Performance Engineering**: Streaming algorithms achieving O(record_size) memory complexity
+- **Data Engineering**: Change Data Capture with encrypted raw data vault for compliance
+- **Software Quality**: Comprehensive testing (170+ tests) including adversarial security tests
+
 **Version:** 1.0.0 | **Last Updated:** January 2026
 
-> **Note:** This project demonstrates production-ready patterns for secure data pipelines, including Hexagonal Architecture, PII redaction, threat protection, and comprehensive testing strategies. It serves as a reference implementation for building secure, maintainable data ingestion systems.
+> **Academic Note:** This project serves as a comprehensive demonstration of production-ready software engineering practices, including secure system design, scalable architecture, and rigorous testing methodologies. It is suitable for portfolio submission to graduate programs in Computer Science, Software Engineering, or Data Engineering.
