@@ -829,6 +829,8 @@ class JSONIngester(IngestionPort):
         Handles:
         - Array of records: [{"patient": {...}, ...}, ...]
         - Single record: {"patient": {...}, ...}
+        - Dict with "records" key: {"records": [{"patient": {...}}, ...]}
+        - Dict with "data" key: {"data": [{"patient": {...}}, ...]}
         - JSONL format: Not directly supported, but could be extended
         
         Parameters:
@@ -840,8 +842,14 @@ class JSONIngester(IngestionPort):
         if isinstance(raw_data, list):
             return raw_data
         elif isinstance(raw_data, dict):
-            # Single record
-            return [raw_data]
+            # Check for common wrapper keys
+            if 'records' in raw_data and isinstance(raw_data['records'], list):
+                return raw_data['records']
+            elif 'data' in raw_data and isinstance(raw_data['data'], list):
+                return raw_data['data']
+            else:
+                # Single record
+                return [raw_data]
         else:
             raise UnsupportedSourceError(
                 f"Unsupported JSON structure: expected array or object, got {type(raw_data).__name__}",

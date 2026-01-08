@@ -440,6 +440,23 @@ class PostgreSQLAdapter(StoragePort):
                 )
                 """)
                 
+                # Create change audit log table for Change Data Capture (CDC)
+                cursor.execute("""
+                CREATE TABLE IF NOT EXISTS change_audit_log (
+                    change_id VARCHAR(50) PRIMARY KEY DEFAULT gen_random_uuid()::text,
+                    table_name VARCHAR(50) NOT NULL,
+                    record_id VARCHAR(50) NOT NULL,
+                    field_name VARCHAR(100) NOT NULL,
+                    old_value TEXT,
+                    new_value TEXT,
+                    change_type VARCHAR(20) NOT NULL,
+                    changed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    ingestion_id VARCHAR(50),
+                    source_adapter VARCHAR(50),
+                    changed_by VARCHAR(100)
+                )
+                """)
+                
                 # Create indexes for performance
                 indexes = [
                 "CREATE INDEX IF NOT EXISTS idx_patients_source ON patients(source_adapter)",
@@ -457,6 +474,10 @@ class PostgreSQLAdapter(StoragePort):
                 "CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON logs(timestamp)",
                 "CREATE INDEX IF NOT EXISTS idx_logs_rule_triggered ON logs(rule_triggered)",
                 "CREATE INDEX IF NOT EXISTS idx_logs_record_id ON logs(record_id)",
+                "CREATE INDEX IF NOT EXISTS idx_change_audit_table_record ON change_audit_log(table_name, record_id)",
+                "CREATE INDEX IF NOT EXISTS idx_change_audit_timestamp ON change_audit_log(changed_at)",
+                "CREATE INDEX IF NOT EXISTS idx_change_audit_ingestion ON change_audit_log(ingestion_id)",
+                "CREATE INDEX IF NOT EXISTS idx_change_audit_covering ON change_audit_log(table_name, record_id, changed_at, field_name)",
                 ]
                 
                 for index_sql in indexes:
