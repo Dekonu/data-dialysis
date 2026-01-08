@@ -54,15 +54,29 @@ app = FastAPI(
 )
 
 # CORS configuration
-# In production, replace with specific origins
+# Read allowed origins from environment variable (comma-separated)
+# Defaults to localhost for development
+cors_origins_env = os.getenv("CORS_ORIGINS", "http://localhost:3000")
+cors_origins = [origin.strip() for origin in cors_origins_env.split(",") if origin.strip()]
+
+# Add default localhost origins if not already present
+default_origins = [
+    "http://localhost:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:3001",
+]
+
+# Merge defaults with environment-provided origins (avoid duplicates)
+for origin in default_origins:
+    if origin not in cors_origins:
+        cors_origins.append(origin)
+
+logger.info(f"CORS allowed origins: {cors_origins}")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",  # Next.js dev server
-        "http://localhost:3001",  # Alternative port
-        "http://127.0.0.1:3000",
-        "http://127.0.0.1:3001",
-    ],
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
