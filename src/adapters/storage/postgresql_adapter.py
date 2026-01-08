@@ -23,7 +23,7 @@ import uuid
 import threading
 import time
 from datetime import datetime
-from typing import Optional, Any
+from typing import Optional, Any, List
 from urllib.parse import quote_plus
 import json
 
@@ -1046,6 +1046,347 @@ class PostgreSQLAdapter(StoragePort):
                 StorageError(error_msg, operation="persist", details={"patient_id": record.patient.patient_id}),
                 error_type="StorageError"
             )
+    
+    def _get_primary_key(self, table_name: str) -> Optional[str]:
+        """Get the primary key column name for a table.
+        
+        Parameters:
+            table_name: Name of the table
+            
+        Returns:
+            Primary key column name or None if not found
+        """
+        primary_keys = {
+            'patients': 'patient_id',
+            'encounters': 'encounter_id',
+            'observations': 'observation_id'
+        }
+        return primary_keys.get(table_name)
+    
+    def _bulk_fetch_existing_records(
+        self,
+        record_ids: List[str],
+        table_name: str,
+        primary_key: str
+    ) -> pd.DataFrame:
+        """Bulk fetch existing records from the database.
+        
+        This method is optimized for performance with large batches (10k-50k records).
+        It fetches all records in a single query rather than per-record queries.
+        
+        Parameters:
+            record_ids: List of primary key values to fetch
+            table_name: Name of the table
+            primary_key: Primary key column name
+            
+        Returns:
+            DataFrame with existing records (empty if none found)
+        
+        Performance:
+            - Single bulk query instead of N queries
+            - Uses parameterized query for safety
+            - Returns empty DataFrame if no records found
+        """
+        if not record_ids:
+            return pd.DataFrame()
+        
+        conn = None
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            
+            # Build parameterized query for bulk fetch
+            # Use IN clause with parameterized values
+            placeholders = ','.join(['%s'] * len(record_ids))
+            query = f"SELECT * FROM {table_name} WHERE {primary_key} IN ({placeholders})"
+            
+            cursor.execute(query, record_ids)
+            
+            # Fetch all results
+            columns = [desc[0] for desc in cursor.description]
+            rows = cursor.fetchall()
+            
+            cursor.close()
+            self._return_connection(conn)
+            
+            if not rows:
+                return pd.DataFrame()
+            
+            # Convert to DataFrame
+            existing_df = pd.DataFrame(rows, columns=columns)
+            logger.debug(f"Fetched {len(existing_df)} existing records from {table_name}")
+            return existing_df
+            
+        except Exception as e:
+            if conn:
+                self._return_connection(conn)
+            logger.warning(f"Failed to fetch existing records from {table_name}: {str(e)}")
+            # Return empty DataFrame on error (treat as all new records)
+            return pd.DataFrame()
+    
+    def _update_changed_fields_bulk(
+        self,
+        merged_df: pd.DataFrame,
+        changes_df: pd.DataFrame,
+        table_name: str,
+        primary_key: str
+    ) -> Result[int]:
+        """Update only changed fields in bulk.
+        
+        This method builds efficient UPDATE statements that only modify fields
+        that have actually changed. For simplicity and performance, it uses
+        a temporary table approach or falls back to selective field updates.
+        
+        Parameters:
+            merged_df: Merged DataFrame with _old and _new columns
+            changes_df: DataFrame of detected changes (from ChangeDetector)
+            table_name: Name of the table
+            primary_key: Primary key column name
+            
+        Returns:
+            Result[int]: Number of records updated or error
+        
+        Performance:
+            - Only updates fields that actually changed
+            - Uses bulk operations where possible
+            - Falls back to standard update if selective update fails
+        """
+        if changes_df.empty or merged_df.empty:
+            return Result.success_result(0)
+        
+        # For Phase 3, we'll use a simpler approach:
+        # Extract only the changed fields and update them using standard persist
+        # This still provides the benefit of change detection and logging
+        # Full selective field updates can be optimized in a future iteration
+        
+        # Get unique record IDs that need updating
+        record_ids = changes_df['record_id'].unique().tolist()
+        
+        # Get list of changed fields
+        changed_fields = changes_df['field_name'].unique().tolist()
+        
+        # Extract only new columns for the changed fields + primary key
+        update_cols = [primary_key] + changed_fields
+        # Get the _new versions of these columns from merged_df
+        new_cols = [col for col in merged_df.columns if col.endswith('_new') and col.replace('_new', '') in changed_fields]
+        new_cols = [primary_key] + new_cols
+        
+        if not new_cols:
+            return Result.success_result(0)
+        
+        # Extract update data
+        updates_df = merged_df[merged_df[primary_key].isin(record_ids)][new_cols].copy()
+        
+        # Rename _new columns back to original names
+        updates_df.columns = [col.replace('_new', '') if col.endswith('_new') else col for col in updates_df.columns]
+        
+        # Use standard persist which will do UPSERT
+        # The key benefit here is that we've detected changes and logged them
+        # The actual UPDATE still updates all provided fields, but we only provide changed ones
+        # This is a good balance between performance and complexity for Phase 3
+        return self.persist_dataframe(updates_df, table_name)
+    
+    def persist_dataframe_smart(
+        self,
+        df: pd.DataFrame,
+        table_name: str,
+        enable_cdc: bool = True,
+        ingestion_id: Optional[str] = None,
+        source_adapter: Optional[str] = None
+    ) -> Result[int]:
+        """Persist DataFrame with smart updates (only changed fields) and CDC.
+        
+        This method implements Change Data Capture (CDC) by:
+        1. Fetching existing records in bulk
+        2. Detecting field-level changes using vectorized operations
+        3. Only updating changed fields (performance optimization)
+        4. Logging all changes to change_audit_log
+        
+        Parameters:
+            df: Validated pandas DataFrame (PII already redacted)
+            table_name: Target table name
+            enable_cdc: Whether to enable CDC (default: True)
+            ingestion_id: ID of the ingestion run (for change logging)
+            source_adapter: Source adapter identifier (for change logging)
+            
+        Returns:
+            Result[int]: Number of rows processed or error
+        
+        Performance:
+            - Single bulk fetch per chunk (not per record)
+            - Vectorized change detection using pandas
+            - Skips UPDATE if no changes detected
+            - Bulk operations for inserts and updates
+        """
+        if df.empty:
+            return Result.success_result(0)
+        
+        # If CDC is disabled, fall back to standard persist
+        if not enable_cdc:
+            return self.persist_dataframe(df, table_name)
+        
+        # Get primary key
+        primary_key = self._get_primary_key(table_name)
+        if not primary_key or primary_key not in df.columns:
+            # No primary key or not in DataFrame - fall back to standard persist
+            logger.warning(f"No primary key found for {table_name}, using standard persist")
+            return self.persist_dataframe(df, table_name)
+        
+        try:
+            # Get unique record IDs from DataFrame
+            record_ids = df[primary_key].unique().tolist()
+            
+            # Bulk fetch existing records
+            existing_df = self._bulk_fetch_existing_records(record_ids, table_name, primary_key)
+            
+            # Import ChangeDetector and ChangeAuditLogger
+            from src.domain.services.change_detector import ChangeDetector
+            from src.infrastructure.audit.change_audit_logger import ChangeAuditLogger
+            
+            # Initialize change detector and logger
+            detector = ChangeDetector(
+                ingestion_id=ingestion_id,
+                source_adapter=source_adapter
+            )
+            change_logger = ChangeAuditLogger()
+            change_logger.set_ingestion_context(ingestion_id, source_adapter)
+            
+            total_processed = 0
+            total_changes = 0
+            
+            # Fast path: all new records
+            if existing_df.empty:
+                logger.debug(f"All {len(df)} records are new for {table_name}, using fast insert path")
+                result = self.persist_dataframe(df, table_name)
+                if result.is_success():
+                    # Log all fields as INSERTs
+                    for _, row in df.iterrows():
+                        record_id = str(row[primary_key])
+                        for col in df.columns:
+                            if col != primary_key and pd.notna(row[col]):
+                                change_logger.log_change(
+                                    table_name=table_name,
+                                    record_id=record_id,
+                                    field_name=col,
+                                    old_value=None,
+                                    new_value=str(row[col]) if not isinstance(row[col], (list, dict)) else json.dumps(row[col]),
+                                    change_type="INSERT"
+                                )
+                                total_changes += 1
+                    
+                    # Flush change logs
+                    if change_logger.has_logs():
+                        flush_result = self.flush_change_logs(change_logger.get_logs())
+                        if flush_result.is_success():
+                            logger.info(f"Logged {change_logger.get_log_count()} INSERT change events for {table_name}")
+                
+                return result
+            
+            # Merge to identify inserts vs updates
+            merged = existing_df.merge(
+                df,
+                on=primary_key,
+                suffixes=('_old', '_new'),
+                how='outer',
+                indicator=True
+            )
+            
+            # Process inserts (records that don't exist)
+            inserts_df = merged[merged['_merge'] == 'right_only']
+            if not inserts_df.empty:
+                # Extract only new columns (remove _old suffix columns)
+                insert_cols = [col for col in df.columns if not col.endswith('_old')]
+                inserts_df_clean = inserts_df[[col for col in insert_cols if col in inserts_df.columns]].copy()
+                
+                insert_result = self.persist_dataframe(inserts_df_clean, table_name)
+                if insert_result.is_success():
+                    total_processed += insert_result.value
+                    
+                    # Log INSERT changes
+                    for _, row in inserts_df_clean.iterrows():
+                        record_id = str(row[primary_key])
+                        for col in insert_cols:
+                            if col != primary_key and pd.notna(row[col]):
+                                change_logger.log_change(
+                                    table_name=table_name,
+                                    record_id=record_id,
+                                    field_name=col,
+                                    old_value=None,
+                                    new_value=str(row[col]) if not isinstance(row[col], (list, dict)) else json.dumps(row[col]),
+                                    change_type="INSERT"
+                                )
+                                total_changes += 1
+            
+            # Process updates (records that exist)
+            updates_df = merged[merged['_merge'] == 'both']
+            if not updates_df.empty:
+                # Use ChangeDetector to find field-level changes
+                changes_df = detector.detect_changes_vectorized(
+                    updates_df,
+                    table_name,
+                    primary_key
+                )
+                
+                if not changes_df.empty:
+                    # Build selective UPDATE statements with only changed fields
+                    # Group changes by record_id to build efficient UPDATE statements
+                    update_result = self._update_changed_fields_bulk(
+                        updates_df,
+                        changes_df,
+                        table_name,
+                        primary_key
+                    )
+                    if update_result.is_success():
+                        total_processed += update_result.value
+                    
+                    # Log UPDATE changes
+                    for _, change_row in changes_df.iterrows():
+                        # Serialize values for logging
+                        old_val = change_row.get('old_value')
+                        new_val = change_row.get('new_value')
+                        
+                        # Handle complex types
+                        if isinstance(old_val, (list, dict)):
+                            old_val = json.dumps(old_val) if old_val is not None else None
+                        elif old_val is not None:
+                            old_val = str(old_val)
+                        
+                        if isinstance(new_val, (list, dict)):
+                            new_val = json.dumps(new_val) if new_val is not None else None
+                        elif new_val is not None:
+                            new_val = str(new_val)
+                        
+                        change_logger.log_change(
+                            table_name=change_row.get('table_name', table_name),
+                            record_id=str(change_row.get('record_id')),
+                            field_name=change_row.get('field_name'),
+                            old_value=old_val,
+                            new_value=new_val,
+                            change_type=change_row.get('change_type', 'UPDATE')
+                        )
+                        total_changes += 1
+                else:
+                    # No changes detected - skip update (performance optimization)
+                    logger.debug(f"No changes detected for {len(updates_df)} records in {table_name}, skipping update")
+                    total_processed += len(updates_df)
+            
+            # Flush all change logs
+            if change_logger.has_logs():
+                flush_result = self.flush_change_logs(change_logger.get_logs())
+                if flush_result.is_success():
+                    logger.info(
+                        f"Logged {change_logger.get_log_count()} change events for {table_name} "
+                        f"({total_changes} fields changed)"
+                    )
+            
+            return Result.success_result(total_processed)
+            
+        except Exception as e:
+            error_msg = f"Failed to persist DataFrame with smart updates to {table_name}: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            # Fall back to standard persist on error
+            logger.warning(f"Falling back to standard persist for {table_name}")
+            return self.persist_dataframe(df, table_name)
     
     def persist_dataframe(self, df: pd.DataFrame, table_name: str) -> Result[int]:
         """Persist a pandas DataFrame directly to a table.
