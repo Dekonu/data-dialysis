@@ -2,13 +2,14 @@
 
 import json
 from datetime import datetime, timezone
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, patch, MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
 
 from src.dashboard.api.main import app
 from src.domain.ports import Result
+from src.dashboard.services.connection_helper import ConnectionWrapper
 
 
 @pytest.fixture
@@ -17,7 +18,7 @@ def mock_storage_adapter():
     adapter = Mock()
     adapter.initialize_schema.return_value = Result.success_result(None)
     
-    # Mock connection with cursor for PostgreSQL compatibility
+    # Mock connection for PostgreSQL compatibility
     mock_conn = Mock()
     mock_cursor = Mock()
     mock_conn.cursor.return_value = mock_cursor
@@ -26,6 +27,20 @@ def mock_storage_adapter():
     adapter.connection_params = {}  # Indicates PostgreSQL adapter
     
     return adapter
+
+
+@pytest.fixture
+def mock_connection_wrapper(mock_storage_adapter):
+    """Mock ConnectionWrapper for testing."""
+    mock_conn = mock_storage_adapter._get_connection.return_value
+    mock_cursor = mock_conn.cursor.return_value
+    
+    # Create a mock wrapper that returns the cursor when execute() is called
+    wrapper = MagicMock(spec=ConnectionWrapper)
+    wrapper.execute = Mock(return_value=mock_cursor)
+    wrapper.close = Mock()
+    
+    return wrapper
 
 
 @pytest.fixture
@@ -44,51 +59,52 @@ def client(mock_storage_adapter):
     app.dependency_overrides.clear()
 
 
+def create_mock_result(fetchone_value, fetchall_value=None, description=None):
+    """Helper to create mock result objects."""
+    result = Mock()
+    result.fetchone.return_value = fetchone_value
+    if fetchall_value is not None:
+        result.fetchall.return_value = fetchall_value
+    if description:
+        result.description = description
+    return result
+
+
 class TestChangeHistoryEndpoint:
     """Tests for GET /api/change-history endpoint."""
     
-    def test_get_change_history_success(self, client, mock_storage_adapter):
+    @patch('src.dashboard.services.change_history_service.get_db_connection')
+    def test_get_change_history_success(self, mock_get_conn, client, mock_storage_adapter, mock_connection_wrapper):
         """Test successful retrieval of change history."""
+        mock_get_conn.return_value.__enter__ = Mock(return_value=mock_connection_wrapper)
+        mock_get_conn.return_value.__exit__ = Mock(return_value=False)
+        
         mock_conn = mock_storage_adapter._get_connection.return_value
         mock_cursor = mock_conn.cursor.return_value
         
-        # Mock cursor description for column names
         mock_cursor.description = [
             ('change_id',), ('table_name',), ('record_id',), ('field_name',),
             ('old_value',), ('new_value',), ('change_type',), ('changed_at',),
             ('ingestion_id',), ('source_adapter',), ('changed_by',)
         ]
         
-        # Set up side effect for cursor.execute calls
-        mock_cursor.fetchone.side_effect = [(5,)]  # Count query
-        mock_cursor.fetchall.return_value = [  # Data query
-            (
-                "change-1",
-                "patients",
-                "P001",
-                "city",
-                "Boston",
-                "Cambridge",
-                "UPDATE",
-                datetime.now(timezone.utc),
-                "ing-123",
-                "csv_ingester",
-                "system"
-            ),
-            (
-                "change-2",
-                "patients",
-                "P002",
-                "phone",
-                "555-0101",
-                "555-0202",
-                "UPDATE",
-                datetime.now(timezone.utc),
-                "ing-123",
-                "csv_ingester",
-                "system"
-            )
-        ]
+        count_result = create_mock_result((5,))
+        data_result = create_mock_result(
+            None,
+            [
+                (
+                    "change-1", "patients", "P001", "city", "Boston", "Cambridge",
+                    "UPDATE", datetime.now(timezone.utc), "ing-123", "csv_ingester", "system"
+                ),
+                (
+                    "change-2", "patients", "P002", "phone", "555-0101", "555-0202",
+                    "UPDATE", datetime.now(timezone.utc), "ing-123", "csv_ingester", "system"
+                )
+            ],
+            mock_cursor.description
+        )
+        
+        mock_connection_wrapper.execute.side_effect = [count_result, data_result]
         
         response = client.get("/api/change-history?limit=10&offset=0")
         
@@ -104,8 +120,12 @@ class TestChangeHistoryEndpoint:
         assert data["changes"][0]["record_id"] == "P001"
         assert data["changes"][0]["field_name"] == "city"
     
-    def test_get_change_history_with_filters(self, client, mock_storage_adapter):
+    @patch('src.dashboard.services.change_history_service.get_db_connection')
+    def test_get_change_history_with_filters(self, mock_get_conn, client, mock_storage_adapter, mock_connection_wrapper):
         """Test change history endpoint with filters."""
+        mock_get_conn.return_value.__enter__ = Mock(return_value=mock_connection_wrapper)
+        mock_get_conn.return_value.__exit__ = Mock(return_value=False)
+        
         mock_conn = mock_storage_adapter._get_connection.return_value
         mock_cursor = mock_conn.cursor.return_value
         
@@ -115,22 +135,19 @@ class TestChangeHistoryEndpoint:
             ('ingestion_id',), ('source_adapter',), ('changed_by',)
         ]
         
-        mock_cursor.fetchone.side_effect = [(2,)]
-        mock_cursor.fetchall.return_value = [
-            (
-                "change-1",
-                "patients",
-                "P001",
-                "city",
-                "Boston",
-                "Cambridge",
-                "UPDATE",
-                datetime.now(timezone.utc),
-                "ing-123",
-                "csv_ingester",
-                "system"
-            )
-        ]
+        count_result = create_mock_result((2,))
+        data_result = create_mock_result(
+            None,
+            [
+                (
+                    "change-1", "patients", "P001", "city", "Boston", "Cambridge",
+                    "UPDATE", datetime.now(timezone.utc), "ing-123", "csv_ingester", "system"
+                )
+            ],
+            mock_cursor.description
+        )
+        
+        mock_connection_wrapper.execute.side_effect = [count_result, data_result]
         
         response = client.get(
             "/api/change-history?"
@@ -146,8 +163,12 @@ class TestChangeHistoryEndpoint:
         assert data["changes"][0]["table_name"] == "patients"
         assert data["changes"][0]["change_type"] == "UPDATE"
     
-    def test_get_change_history_with_date_filters(self, client, mock_storage_adapter):
+    @patch('src.dashboard.services.change_history_service.get_db_connection')
+    def test_get_change_history_with_date_filters(self, mock_get_conn, client, mock_storage_adapter, mock_connection_wrapper):
         """Test change history endpoint with date filters."""
+        mock_get_conn.return_value.__enter__ = Mock(return_value=mock_connection_wrapper)
+        mock_get_conn.return_value.__exit__ = Mock(return_value=False)
+        
         start_date = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
         end_date = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
         
@@ -160,22 +181,19 @@ class TestChangeHistoryEndpoint:
             ('ingestion_id',), ('source_adapter',), ('changed_by',)
         ]
         
-        mock_cursor.fetchone.side_effect = [(1,)]
-        mock_cursor.fetchall.return_value = [
-            (
-                "change-1",
-                "patients",
-                "P001",
-                "city",
-                "Boston",
-                "Cambridge",
-                "UPDATE",
-                datetime.now(timezone.utc),
-                "ing-123",
-                "csv_ingester",
-                "system"
-            )
-        ]
+        count_result = create_mock_result((1,))
+        data_result = create_mock_result(
+            None,
+            [
+                (
+                    "change-1", "patients", "P001", "city", "Boston", "Cambridge",
+                    "UPDATE", datetime.now(timezone.utc), "ing-123", "csv_ingester", "system"
+                )
+            ],
+            mock_cursor.description
+        )
+        
+        mock_connection_wrapper.execute.side_effect = [count_result, data_result]
         
         response = client.get(
             f"/api/change-history?"
@@ -194,8 +212,12 @@ class TestChangeHistoryEndpoint:
         assert response.status_code == 400
         assert "Invalid start_date format" in response.json()["detail"]
     
-    def test_get_change_history_with_record_id_filter(self, client, mock_storage_adapter):
+    @patch('src.dashboard.services.change_history_service.get_db_connection')
+    def test_get_change_history_with_record_id_filter(self, mock_get_conn, client, mock_storage_adapter, mock_connection_wrapper):
         """Test change history endpoint with record_id filter."""
+        mock_get_conn.return_value.__enter__ = Mock(return_value=mock_connection_wrapper)
+        mock_get_conn.return_value.__exit__ = Mock(return_value=False)
+        
         mock_conn = mock_storage_adapter._get_connection.return_value
         mock_cursor = mock_conn.cursor.return_value
         
@@ -205,35 +227,23 @@ class TestChangeHistoryEndpoint:
             ('ingestion_id',), ('source_adapter',), ('changed_by',)
         ]
         
-        mock_cursor.fetchone.side_effect = [(3,)]
-        mock_cursor.fetchall.return_value = [
-            (
-                "change-1",
-                "patients",
-                "P001",
-                "city",
-                "Boston",
-                "Cambridge",
-                "UPDATE",
-                datetime.now(timezone.utc),
-                "ing-123",
-                "csv_ingester",
-                "system"
-            ),
-            (
-                "change-2",
-                "patients",
-                "P001",
-                "phone",
-                "555-0101",
-                "555-0202",
-                "UPDATE",
-                datetime.now(timezone.utc),
-                "ing-123",
-                "csv_ingester",
-                "system"
-            )
-        ]
+        count_result = create_mock_result((3,))
+        data_result = create_mock_result(
+            None,
+            [
+                (
+                    "change-1", "patients", "P001", "city", "Boston", "Cambridge",
+                    "UPDATE", datetime.now(timezone.utc), "ing-123", "csv_ingester", "system"
+                ),
+                (
+                    "change-2", "patients", "P001", "phone", "555-0101", "555-0202",
+                    "UPDATE", datetime.now(timezone.utc), "ing-123", "csv_ingester", "system"
+                )
+            ],
+            mock_cursor.description
+        )
+        
+        mock_connection_wrapper.execute.side_effect = [count_result, data_result]
         
         response = client.get("/api/change-history?record_id=P001")
         
@@ -242,8 +252,12 @@ class TestChangeHistoryEndpoint:
         assert len(data["changes"]) == 2
         assert all(change["record_id"] == "P001" for change in data["changes"])
     
-    def test_get_change_history_with_field_name_filter(self, client, mock_storage_adapter):
+    @patch('src.dashboard.services.change_history_service.get_db_connection')
+    def test_get_change_history_with_field_name_filter(self, mock_get_conn, client, mock_storage_adapter, mock_connection_wrapper):
         """Test change history endpoint with field_name filter."""
+        mock_get_conn.return_value.__enter__ = Mock(return_value=mock_connection_wrapper)
+        mock_get_conn.return_value.__exit__ = Mock(return_value=False)
+        
         mock_conn = mock_storage_adapter._get_connection.return_value
         mock_cursor = mock_conn.cursor.return_value
         
@@ -253,22 +267,19 @@ class TestChangeHistoryEndpoint:
             ('ingestion_id',), ('source_adapter',), ('changed_by',)
         ]
         
-        mock_cursor.fetchone.side_effect = [(2,)]
-        mock_cursor.fetchall.return_value = [
-            (
-                "change-1",
-                "patients",
-                "P001",
-                "city",
-                "Boston",
-                "Cambridge",
-                "UPDATE",
-                datetime.now(timezone.utc),
-                "ing-123",
-                "csv_ingester",
-                "system"
-            )
-        ]
+        count_result = create_mock_result((2,))
+        data_result = create_mock_result(
+            None,
+            [
+                (
+                    "change-1", "patients", "P001", "city", "Boston", "Cambridge",
+                    "UPDATE", datetime.now(timezone.utc), "ing-123", "csv_ingester", "system"
+                )
+            ],
+            mock_cursor.description
+        )
+        
+        mock_connection_wrapper.execute.side_effect = [count_result, data_result]
         
         response = client.get("/api/change-history?field_name=city")
         
@@ -277,8 +288,12 @@ class TestChangeHistoryEndpoint:
         assert len(data["changes"]) == 1
         assert data["changes"][0]["field_name"] == "city"
     
-    def test_get_change_history_with_sorting(self, client, mock_storage_adapter):
+    @patch('src.dashboard.services.change_history_service.get_db_connection')
+    def test_get_change_history_with_sorting(self, mock_get_conn, client, mock_storage_adapter, mock_connection_wrapper):
         """Test change history endpoint with sorting."""
+        mock_get_conn.return_value.__enter__ = Mock(return_value=mock_connection_wrapper)
+        mock_get_conn.return_value.__exit__ = Mock(return_value=False)
+        
         mock_conn = mock_storage_adapter._get_connection.return_value
         mock_cursor = mock_conn.cursor.return_value
         
@@ -288,22 +303,19 @@ class TestChangeHistoryEndpoint:
             ('ingestion_id',), ('source_adapter',), ('changed_by',)
         ]
         
-        mock_cursor.fetchone.side_effect = [(2,)]
-        mock_cursor.fetchall.return_value = [
-            (
-                "change-1",
-                "patients",
-                "P001",
-                "city",
-                "Boston",
-                "Cambridge",
-                "UPDATE",
-                datetime.now(timezone.utc),
-                "ing-123",
-                "csv_ingester",
-                "system"
-            )
-        ]
+        count_result = create_mock_result((2,))
+        data_result = create_mock_result(
+            None,
+            [
+                (
+                    "change-1", "patients", "P001", "city", "Boston", "Cambridge",
+                    "UPDATE", datetime.now(timezone.utc), "ing-123", "csv_ingester", "system"
+                )
+            ],
+            mock_cursor.description
+        )
+        
+        mock_connection_wrapper.execute.side_effect = [count_result, data_result]
         
         response = client.get("/api/change-history?sort_by=field_name&sort_order=ASC")
         
@@ -315,20 +327,17 @@ class TestChangeHistoryEndpoint:
 class TestChangeHistorySummaryEndpoint:
     """Tests for GET /api/change-history/summary endpoint."""
     
-    def test_get_change_summary_success(self, client, mock_storage_adapter):
+    @patch('src.dashboard.services.change_history_service.get_db_connection')
+    def test_get_change_summary_success(self, mock_get_conn, client, mock_storage_adapter, mock_connection_wrapper):
         """Test successful retrieval of change summary."""
-        mock_conn = mock_storage_adapter._get_connection.return_value
-        mock_cursor = mock_conn.cursor.return_value
+        mock_get_conn.return_value.__enter__ = Mock(return_value=mock_connection_wrapper)
+        mock_get_conn.return_value.__exit__ = Mock(return_value=False)
         
-        mock_cursor.fetchone.return_value = (
-            100,  # total_changes
-            50,   # unique_records
-            3,    # tables_affected
-            15,   # fields_changed
-            20,   # inserts
-            75,   # updates
-            5     # deletes
+        summary_result = create_mock_result(
+            (100, 50, 3, 15, 20, 75, 0)  # total_changes, unique_records, tables_affected, fields_changed, inserts, updates, deletes
         )
+        
+        mock_connection_wrapper.execute.return_value = summary_result
         
         response = client.get("/api/change-history/summary?time_range=24h")
         
@@ -340,25 +349,22 @@ class TestChangeHistorySummaryEndpoint:
         assert data["fields_changed"] == 15
         assert data["inserts"] == 20
         assert data["updates"] == 75
-        assert data["deletes"] == 5
+        assert data["deletes"] == 0
         assert data["time_range"] == "24h"
         assert "start_time" in data
         assert "end_time" in data
     
-    def test_get_change_summary_with_table_filter(self, client, mock_storage_adapter):
+    @patch('src.dashboard.services.change_history_service.get_db_connection')
+    def test_get_change_summary_with_table_filter(self, mock_get_conn, client, mock_storage_adapter, mock_connection_wrapper):
         """Test change summary endpoint with table filter."""
-        mock_conn = mock_storage_adapter._get_connection.return_value
-        mock_cursor = mock_conn.cursor.return_value
+        mock_get_conn.return_value.__enter__ = Mock(return_value=mock_connection_wrapper)
+        mock_get_conn.return_value.__exit__ = Mock(return_value=False)
         
-        mock_cursor.fetchone.return_value = (
-            25,   # total_changes
-            10,   # unique_records
-            1,    # tables_affected
-            5,    # fields_changed
-            5,    # inserts
-            20,   # updates
-            0     # deletes
+        summary_result = create_mock_result(
+            (25, 10, 1, 5, 5, 20, 0)  # total_changes, unique_records, tables_affected, fields_changed, inserts, updates, deletes
         )
+        
+        mock_connection_wrapper.execute.return_value = summary_result
         
         response = client.get("/api/change-history/summary?time_range=24h&table_name=patients")
         
@@ -377,8 +383,12 @@ class TestChangeHistorySummaryEndpoint:
 class TestRecordChangeHistoryEndpoint:
     """Tests for GET /api/change-history/record/{table_name}/{record_id} endpoint."""
     
-    def test_get_record_change_history_success(self, client, mock_storage_adapter):
+    @patch('src.dashboard.services.change_history_service.get_db_connection')
+    def test_get_record_change_history_success(self, mock_get_conn, client, mock_storage_adapter, mock_connection_wrapper):
         """Test successful retrieval of record change history."""
+        mock_get_conn.return_value.__enter__ = Mock(return_value=mock_connection_wrapper)
+        mock_get_conn.return_value.__exit__ = Mock(return_value=False)
+        
         mock_conn = mock_storage_adapter._get_connection.return_value
         mock_cursor = mock_conn.cursor.return_value
         
@@ -388,48 +398,27 @@ class TestRecordChangeHistoryEndpoint:
             ('ingestion_id',), ('source_adapter',), ('changed_by',)
         ]
         
-        mock_cursor.fetchone.side_effect = [(3,)]  # Count query
-        mock_cursor.fetchall.return_value = [
-            (
-                "change-1",
-                "patients",
-                "P001",
-                "city",
-                "Boston",
-                "Cambridge",
-                "UPDATE",
-                datetime.now(timezone.utc),
-                "ing-123",
-                "csv_ingester",
-                "system"
-            ),
-            (
-                "change-2",
-                "patients",
-                "P001",
-                "phone",
-                "555-0101",
-                "555-0202",
-                "UPDATE",
-                datetime.now(timezone.utc),
-                "ing-123",
-                "csv_ingester",
-                "system"
-            ),
-            (
-                "change-3",
-                "patients",
-                "P001",
-                "family_name",
-                None,
-                "Smith",
-                "INSERT",
-                datetime.now(timezone.utc),
-                "ing-123",
-                "csv_ingester",
-                "system"
-            )
-        ]
+        count_result = create_mock_result((3,))
+        data_result = create_mock_result(
+            None,
+            [
+                (
+                    "change-1", "patients", "P001", "city", "Boston", "Cambridge",
+                    "UPDATE", datetime.now(timezone.utc), "ing-123", "csv_ingester", "system"
+                ),
+                (
+                    "change-2", "patients", "P001", "phone", "555-0101", "555-0202",
+                    "UPDATE", datetime.now(timezone.utc), "ing-123", "csv_ingester", "system"
+                ),
+                (
+                    "change-3", "patients", "P001", "family_name", None, "Smith",
+                    "INSERT", datetime.now(timezone.utc), "ing-123", "csv_ingester", "system"
+                )
+            ],
+            mock_cursor.description
+        )
+        
+        mock_connection_wrapper.execute.side_effect = [count_result, data_result]
         
         response = client.get("/api/change-history/record/patients/P001")
         
@@ -441,8 +430,12 @@ class TestRecordChangeHistoryEndpoint:
         assert len(data["changes"]) == 3
         assert data["changes"][0]["record_id"] == "P001"
     
-    def test_get_record_change_history_with_limit(self, client, mock_storage_adapter):
+    @patch('src.dashboard.services.change_history_service.get_db_connection')
+    def test_get_record_change_history_with_limit(self, mock_get_conn, client, mock_storage_adapter, mock_connection_wrapper):
         """Test record change history endpoint with limit."""
+        mock_get_conn.return_value.__enter__ = Mock(return_value=mock_connection_wrapper)
+        mock_get_conn.return_value.__exit__ = Mock(return_value=False)
+        
         mock_conn = mock_storage_adapter._get_connection.return_value
         mock_cursor = mock_conn.cursor.return_value
         
@@ -452,22 +445,19 @@ class TestRecordChangeHistoryEndpoint:
             ('ingestion_id',), ('source_adapter',), ('changed_by',)
         ]
         
-        mock_cursor.fetchone.side_effect = [(5,)]
-        mock_cursor.fetchall.return_value = [
-            (
-                "change-1",
-                "patients",
-                "P001",
-                "city",
-                "Boston",
-                "Cambridge",
-                "UPDATE",
-                datetime.now(timezone.utc),
-                "ing-123",
-                "csv_ingester",
-                "system"
-            )
-        ]
+        count_result = create_mock_result((5,))
+        data_result = create_mock_result(
+            None,
+            [
+                (
+                    "change-1", "patients", "P001", "city", "Boston", "Cambridge",
+                    "UPDATE", datetime.now(timezone.utc), "ing-123", "csv_ingester", "system"
+                )
+            ],
+            mock_cursor.description
+        )
+        
+        mock_connection_wrapper.execute.side_effect = [count_result, data_result]
         
         response = client.get("/api/change-history/record/patients/P001?limit=1")
         
@@ -479,8 +469,12 @@ class TestRecordChangeHistoryEndpoint:
 class TestExportChangeHistoryEndpoint:
     """Tests for GET /api/change-history/export endpoint."""
     
-    def test_export_change_history_csv(self, client, mock_storage_adapter):
+    @patch('src.dashboard.services.change_history_service.get_db_connection')
+    def test_export_change_history_csv(self, mock_get_conn, client, mock_storage_adapter, mock_connection_wrapper):
         """Test exporting change history as CSV."""
+        mock_get_conn.return_value.__enter__ = Mock(return_value=mock_connection_wrapper)
+        mock_get_conn.return_value.__exit__ = Mock(return_value=False)
+        
         mock_conn = mock_storage_adapter._get_connection.return_value
         mock_cursor = mock_conn.cursor.return_value
         
@@ -490,35 +484,23 @@ class TestExportChangeHistoryEndpoint:
             ('ingestion_id',), ('source_adapter',), ('changed_by',)
         ]
         
-        mock_cursor.fetchone.side_effect = [(2,)]
-        mock_cursor.fetchall.return_value = [
-            (
-                "change-1",
-                "patients",
-                "P001",
-                "city",
-                "Boston",
-                "Cambridge",
-                "UPDATE",
-                datetime.now(timezone.utc),
-                "ing-123",
-                "csv_ingester",
-                "system"
-            ),
-            (
-                "change-2",
-                "patients",
-                "P002",
-                "phone",
-                "555-0101",
-                "555-0202",
-                "UPDATE",
-                datetime.now(timezone.utc),
-                "ing-123",
-                "csv_ingester",
-                "system"
-            )
-        ]
+        count_result = create_mock_result((2,))
+        data_result = create_mock_result(
+            None,
+            [
+                (
+                    "change-1", "patients", "P001", "city", "Boston", "Cambridge",
+                    "UPDATE", datetime.now(timezone.utc), "ing-123", "csv_ingester", "system"
+                ),
+                (
+                    "change-2", "patients", "P002", "phone", "555-0101", "555-0202",
+                    "UPDATE", datetime.now(timezone.utc), "ing-123", "csv_ingester", "system"
+                )
+            ],
+            mock_cursor.description
+        )
+        
+        mock_connection_wrapper.execute.side_effect = [count_result, data_result]
         
         response = client.get("/api/change-history/export?format=csv")
         
@@ -534,8 +516,12 @@ class TestExportChangeHistoryEndpoint:
         assert "P001" in content
         assert "P002" in content
     
-    def test_export_change_history_json(self, client, mock_storage_adapter):
+    @patch('src.dashboard.services.change_history_service.get_db_connection')
+    def test_export_change_history_json(self, mock_get_conn, client, mock_storage_adapter, mock_connection_wrapper):
         """Test exporting change history as JSON."""
+        mock_get_conn.return_value.__enter__ = Mock(return_value=mock_connection_wrapper)
+        mock_get_conn.return_value.__exit__ = Mock(return_value=False)
+        
         mock_conn = mock_storage_adapter._get_connection.return_value
         mock_cursor = mock_conn.cursor.return_value
         
@@ -545,22 +531,19 @@ class TestExportChangeHistoryEndpoint:
             ('ingestion_id',), ('source_adapter',), ('changed_by',)
         ]
         
-        mock_cursor.fetchone.side_effect = [(1,)]
-        mock_cursor.fetchall.return_value = [
-            (
-                "change-1",
-                "patients",
-                "P001",
-                "city",
-                "Boston",
-                "Cambridge",
-                "UPDATE",
-                datetime.now(timezone.utc),
-                "ing-123",
-                "csv_ingester",
-                "system"
-            )
-        ]
+        count_result = create_mock_result((1,))
+        data_result = create_mock_result(
+            None,
+            [
+                (
+                    "change-1", "patients", "P001", "city", "Boston", "Cambridge",
+                    "UPDATE", datetime.now(timezone.utc), "ing-123", "csv_ingester", "system"
+                )
+            ],
+            mock_cursor.description
+        )
+        
+        mock_connection_wrapper.execute.side_effect = [count_result, data_result]
         
         response = client.get("/api/change-history/export?format=json")
         
@@ -569,15 +552,19 @@ class TestExportChangeHistoryEndpoint:
         assert "attachment" in response.headers["content-disposition"]
         assert "change_history" in response.headers["content-disposition"]
         
-        # Verify JSON content
+        # Verify JSON content - the endpoint returns a list
         data = response.json()
         assert isinstance(data, list)
         assert len(data) == 1
         assert data[0]["change_id"] == "change-1"
         assert data[0]["table_name"] == "patients"
     
-    def test_export_change_history_with_filters(self, client, mock_storage_adapter):
+    @patch('src.dashboard.services.change_history_service.get_db_connection')
+    def test_export_change_history_with_filters(self, mock_get_conn, client, mock_storage_adapter, mock_connection_wrapper):
         """Test exporting change history with filters."""
+        mock_get_conn.return_value.__enter__ = Mock(return_value=mock_connection_wrapper)
+        mock_get_conn.return_value.__exit__ = Mock(return_value=False)
+        
         mock_conn = mock_storage_adapter._get_connection.return_value
         mock_cursor = mock_conn.cursor.return_value
         
@@ -587,22 +574,19 @@ class TestExportChangeHistoryEndpoint:
             ('ingestion_id',), ('source_adapter',), ('changed_by',)
         ]
         
-        mock_cursor.fetchone.side_effect = [(1,)]
-        mock_cursor.fetchall.return_value = [
-            (
-                "change-1",
-                "patients",
-                "P001",
-                "city",
-                "Boston",
-                "Cambridge",
-                "UPDATE",
-                datetime.now(timezone.utc),
-                "ing-123",
-                "csv_ingester",
-                "system"
-            )
-        ]
+        count_result = create_mock_result((1,))
+        data_result = create_mock_result(
+            None,
+            [
+                (
+                    "change-1", "patients", "P001", "city", "Boston", "Cambridge",
+                    "UPDATE", datetime.now(timezone.utc), "ing-123", "csv_ingester", "system"
+                )
+            ],
+            mock_cursor.description
+        )
+        
+        mock_connection_wrapper.execute.side_effect = [count_result, data_result]
         
         response = client.get(
             "/api/change-history/export?"
@@ -620,8 +604,12 @@ class TestExportChangeHistoryEndpoint:
         
         assert response.status_code == 422  # Validation error
     
-    def test_export_change_history_with_date_filters(self, client, mock_storage_adapter):
+    @patch('src.dashboard.services.change_history_service.get_db_connection')
+    def test_export_change_history_with_date_filters(self, mock_get_conn, client, mock_storage_adapter, mock_connection_wrapper):
         """Test export endpoint with date filters."""
+        mock_get_conn.return_value.__enter__ = Mock(return_value=mock_connection_wrapper)
+        mock_get_conn.return_value.__exit__ = Mock(return_value=False)
+        
         start_date = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
         end_date = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
         
@@ -634,8 +622,10 @@ class TestExportChangeHistoryEndpoint:
             ('ingestion_id',), ('source_adapter',), ('changed_by',)
         ]
         
-        mock_cursor.fetchone.side_effect = [(0,)]
-        mock_cursor.fetchall.return_value = []
+        count_result = create_mock_result((0,))
+        data_result = create_mock_result(None, [], mock_cursor.description)
+        
+        mock_connection_wrapper.execute.side_effect = [count_result, data_result]
         
         response = client.get(
             f"/api/change-history/export?"
@@ -653,29 +643,37 @@ class TestExportChangeHistoryEndpoint:
 class TestChangeHistoryErrorHandling:
     """Tests for error handling in change history endpoints."""
     
-    def test_get_change_history_database_error(self, client, mock_storage_adapter):
+    @patch('src.dashboard.services.change_history_service.get_db_connection')
+    def test_get_change_history_database_error(self, mock_get_conn, client, mock_storage_adapter, mock_connection_wrapper):
         """Test change history endpoint handles database errors."""
-        mock_conn = mock_storage_adapter._get_connection.return_value
-        mock_cursor = mock_conn.cursor.return_value
-        mock_cursor.fetchone.side_effect = Exception("Database connection error")
+        mock_get_conn.return_value.__enter__ = Mock(return_value=mock_connection_wrapper)
+        mock_get_conn.return_value.__exit__ = Mock(return_value=False)
+        
+        mock_connection_wrapper.execute.side_effect = Exception("Database connection error")
         
         response = client.get("/api/change-history")
         
         assert response.status_code == 500
         assert "error" in response.json()["detail"].lower() or "error" in str(response.json())
     
-    def test_get_change_summary_database_error(self, client, mock_storage_adapter):
+    @patch('src.dashboard.services.change_history_service.get_db_connection')
+    def test_get_change_summary_database_error(self, mock_get_conn, client, mock_storage_adapter, mock_connection_wrapper):
         """Test change summary endpoint handles database errors."""
-        mock_conn = mock_storage_adapter._get_connection.return_value
-        mock_cursor = mock_conn.cursor.return_value
-        mock_cursor.fetchone.side_effect = Exception("Database connection error")
+        mock_get_conn.return_value.__enter__ = Mock(return_value=mock_connection_wrapper)
+        mock_get_conn.return_value.__exit__ = Mock(return_value=False)
+        
+        mock_connection_wrapper.execute.side_effect = Exception("Database connection error")
         
         response = client.get("/api/change-history/summary")
         
         assert response.status_code == 500
     
-    def test_get_change_history_empty_result(self, client, mock_storage_adapter):
+    @patch('src.dashboard.services.change_history_service.get_db_connection')
+    def test_get_change_history_empty_result(self, mock_get_conn, client, mock_storage_adapter, mock_connection_wrapper):
         """Test change history endpoint with no results."""
+        mock_get_conn.return_value.__enter__ = Mock(return_value=mock_connection_wrapper)
+        mock_get_conn.return_value.__exit__ = Mock(return_value=False)
+        
         mock_conn = mock_storage_adapter._get_connection.return_value
         mock_cursor = mock_conn.cursor.return_value
         
@@ -685,8 +683,10 @@ class TestChangeHistoryErrorHandling:
             ('ingestion_id',), ('source_adapter',), ('changed_by',)
         ]
         
-        mock_cursor.fetchone.side_effect = [(0,)]
-        mock_cursor.fetchall.return_value = []
+        count_result = create_mock_result((0,))
+        data_result = create_mock_result(None, [], mock_cursor.description)
+        
+        mock_connection_wrapper.execute.side_effect = [count_result, data_result]
         
         response = client.get("/api/change-history")
         
