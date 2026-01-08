@@ -1674,6 +1674,101 @@ class PostgreSQLAdapter(StoragePort):
             if conn:
                 self._return_connection(conn)
     
+    def flush_change_logs(self, change_logs: list[dict]) -> Result[int]:
+        """Flush multiple change audit logs to the database in a single transaction.
+        
+        This method uses bulk insert (execute_values) for performance with large
+        batches of change events, which is critical for CDC with millions of records.
+        
+        Parameters:
+            change_logs: List of change log dictionaries (from ChangeAuditLogger.get_logs())
+            
+        Returns:
+            Result[int]: Number of logs persisted or error
+        
+        Security Impact:
+            - Change logs may contain PII (old/new values)
+            - Ensure values are redacted before logging
+            - Logs are immutable (append-only) for compliance
+        
+        Performance:
+            - Uses execute_values for bulk insert (much faster than individual INSERTs)
+            - Single transaction for all logs in the batch
+            - Optimized for batches of 10k-50k change events
+        """
+        if not change_logs:
+            return Result.success_result(0)
+        
+        conn = None
+        try:
+            if not self._initialized:
+                init_result = self.initialize_schema()
+                if not init_result.is_success():
+                    return init_result
+            
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            
+            # Prepare data for bulk insert using execute_values
+            from psycopg2.extras import execute_values
+            
+            columns = [
+                'change_id', 'table_name', 'record_id', 'field_name',
+                'old_value', 'new_value', 'change_type', 'changed_at',
+                'ingestion_id', 'source_adapter', 'changed_by'
+            ]
+            
+            # Convert log entries to tuples for bulk insert
+            values = []
+            for log_entry in change_logs:
+                values.append((
+                    log_entry.get('change_id', str(uuid.uuid4())),
+                    log_entry.get('table_name'),
+                    log_entry.get('record_id'),
+                    log_entry.get('field_name'),
+                    log_entry.get('old_value'),
+                    log_entry.get('new_value'),
+                    log_entry.get('change_type'),
+                    log_entry.get('changed_at', datetime.now()),
+                    log_entry.get('ingestion_id'),
+                    log_entry.get('source_adapter'),
+                    log_entry.get('changed_by', 'system')
+                ))
+            
+            # Bulk insert using execute_values for performance
+            insert_sql = f"""
+                INSERT INTO change_audit_log ({', '.join(columns)})
+                VALUES %s
+            """
+            
+            execute_values(
+                cursor,
+                insert_sql,
+                values,
+                template=None,
+                page_size=10000  # Insert in chunks of 10k for very large batches
+            )
+            
+            conn.commit()
+            cursor.close()
+            
+            count = len(change_logs)
+            logger.info(f"Flushed {count} change audit logs to database")
+            return Result.success_result(count)
+            
+        except Exception as e:
+            if conn:
+                conn.rollback()
+            error_msg = f"Failed to flush change logs: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            return Result.failure_result(
+                StorageError(error_msg, operation="flush_change_logs"),
+                error_type="StorageError"
+            )
+        finally:
+            if conn:
+                self._return_connection(conn)
+    
     def close(self) -> None:
         """Close storage connection pool and release resources."""
         if self._connection_pool is not None:
