@@ -1165,20 +1165,116 @@ class PostgreSQLAdapter(StoragePort):
         # Get list of changed fields
         changed_fields = changes_df['field_name'].unique().tolist()
         
-        # Extract only new columns for the changed fields + primary key
-        update_cols = [primary_key] + changed_fields
-        # Get the _new versions of these columns from merged_df
-        new_cols = [col for col in merged_df.columns if col.endswith('_new') and col.replace('_new', '') in changed_fields]
-        new_cols = [primary_key] + new_cols
+        # Filter merged_df to only records that need updating
+        # Note: After merge with suffixes, the primary key column doesn't get a suffix
+        # So we can access it directly
+        try:
+            updates_merged = merged_df[merged_df[primary_key].isin(record_ids)].copy()
+        except KeyError as e:
+            logger.error(f"Primary key {primary_key} not found in merged DataFrame. Available columns: {list(merged_df.columns)}")
+            # Fall back to standard update
+            return self._fallback_to_standard_update(merged_df, primary_key, table_name)
         
-        if not new_cols:
+        if updates_merged.empty:
             return Result.success_result(0)
         
-        # Extract update data
-        updates_df = merged_df[merged_df[primary_key].isin(record_ids)][new_cols].copy()
+        # Build DataFrame with only changed fields
+        # Start with primary key - it doesn't have a suffix after merge
+        update_data = {}
+        try:
+            if primary_key in updates_merged.columns:
+                update_data[primary_key] = updates_merged[primary_key].tolist()
+            else:
+                logger.error(f"Primary key {primary_key} not found in updates_merged. Available columns: {list(updates_merged.columns)}")
+                return self._fallback_to_standard_update(merged_df, primary_key, table_name)
+        except Exception as e:
+            logger.error(f"Error accessing primary key {primary_key}: {str(e)}")
+            return self._fallback_to_standard_update(merged_df, primary_key, table_name)
         
-        # Rename _new columns back to original names
-        updates_df.columns = [col.replace('_new', '') if col.endswith('_new') else col for col in updates_df.columns]
+        # For each changed field, get the _new value from merged_df
+        for field_name in changed_fields:
+            new_col = f"{field_name}_new"
+            try:
+                if new_col in updates_merged.columns:
+                    # Get values as list to maintain index alignment
+                    update_data[field_name] = updates_merged[new_col].tolist()
+                elif field_name in updates_merged.columns:
+                    # If _new column doesn't exist, try original name (shouldn't happen but handle it)
+                    update_data[field_name] = updates_merged[field_name].tolist()
+                else:
+                    logger.warning(f"Field {field_name} (or {new_col}) not found in merged DataFrame. Available: {list(updates_merged.columns)}")
+                    # Skip this field - it won't be updated
+            except Exception as e:
+                logger.warning(f"Error accessing field {field_name}: {str(e)}. Skipping this field.")
+                continue
+        
+        # Create DataFrame with only changed fields
+        if not update_data or len(update_data) == 1:  # Only primary key, no fields to update
+            logger.warning("No fields to update after filtering")
+            return Result.success_result(0)
+        
+        # Ensure all lists have the same length
+        lengths = [len(v) for v in update_data.values() if isinstance(v, list)]
+        if lengths and len(set(lengths)) > 1:
+            logger.error(f"Inconsistent data lengths in update_data: {lengths}")
+            return self._fallback_to_standard_update(merged_df, primary_key, table_name)
+        
+        try:
+            updates_df = pd.DataFrame(update_data)
+        except Exception as e:
+            logger.error(f"Error creating update DataFrame: {str(e)}")
+            return self._fallback_to_standard_update(merged_df, primary_key, table_name)
+        
+        if updates_df.empty:
+            return Result.success_result(0)
+        
+        # Use standard persist which will do UPSERT
+        # The key benefit here is that we've detected changes and logged them
+        # The actual UPDATE still updates all provided fields, but we only provide changed ones
+        # This is a good balance between performance and complexity for Phase 3
+        try:
+            result = self.persist_dataframe(updates_df, table_name)
+            return result if result is not None else Result.success_result(0)
+        except Exception as e:
+            logger.error(f"Error in persist_dataframe during update: {str(e)}")
+            return self._fallback_to_standard_update(merged_df, primary_key, table_name)
+    
+    def _fallback_to_standard_update(
+        self,
+        merged_df: pd.DataFrame,
+        primary_key: str,
+        table_name: str
+    ) -> Result[int]:
+        """Fallback to standard update when selective update fails.
+        
+        This extracts all new columns from the merged DataFrame and uses
+        standard persist (which will do UPSERT).
+        """
+        try:
+            # Get all columns that end with _new (these are the new values)
+            new_cols = [col for col in merged_df.columns if col.endswith('_new')]
+            if not new_cols:
+                return Result.success_result(0)
+            
+            # Also include primary key
+            if primary_key not in merged_df.columns:
+                logger.error(f"Primary key {primary_key} not found for fallback update")
+                return Result.success_result(0)
+            
+            # Extract update data
+            update_cols = [primary_key] + new_cols
+            updates_df = merged_df[update_cols].copy()
+            
+            # Rename _new columns back to original names
+            updates_df.columns = [col.replace('_new', '') if col.endswith('_new') else col for col in updates_df.columns]
+            
+            return self.persist_dataframe(updates_df, table_name)
+        except Exception as e:
+            logger.error(f"Error in fallback update: {str(e)}")
+            return Result.failure_result(
+                StorageError(f"Failed to perform fallback update: {str(e)}", operation="_fallback_to_standard_update"),
+                error_type="StorageError"
+            )
         
         # Use standard persist which will do UPSERT
         # The key benefit here is that we've detected changes and logged them
@@ -1306,16 +1402,26 @@ class PostgreSQLAdapter(StoragePort):
                     for _, row in inserts_df_clean.iterrows():
                         record_id = str(row[primary_key])
                         for col in insert_cols:
-                            if col != primary_key and pd.notna(row[col]):
-                                change_logger.log_change(
-                                    table_name=table_name,
-                                    record_id=record_id,
-                                    field_name=col,
-                                    old_value=None,
-                                    new_value=str(row[col]) if not isinstance(row[col], (list, dict)) else json.dumps(row[col]),
-                                    change_type="INSERT"
-                                )
-                                total_changes += 1
+                            if col != primary_key and col in row.index and pd.notna(row[col]):
+                                try:
+                                    value = row[col]
+                                    if isinstance(value, (list, dict)):
+                                        new_value = json.dumps(value)
+                                    else:
+                                        new_value = str(value)
+                                    
+                                    change_logger.log_change(
+                                        table_name=table_name,
+                                        record_id=record_id,
+                                        field_name=col,
+                                        old_value=None,
+                                        new_value=new_value,
+                                        change_type="INSERT"
+                                    )
+                                    total_changes += 1
+                                except (KeyError, AttributeError) as e:
+                                    logger.warning(f"Error logging INSERT change for {col}: {str(e)}")
+                                    continue
             
             # Process updates (records that exist)
             updates_df = merged[merged['_merge'] == 'both']
@@ -1336,7 +1442,7 @@ class PostgreSQLAdapter(StoragePort):
                         table_name,
                         primary_key
                     )
-                    if update_result.is_success():
+                    if update_result and update_result.is_success():
                         total_processed += update_result.value
                     
                     # Log UPDATE changes
