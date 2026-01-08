@@ -464,8 +464,14 @@ class XMLIngester(IngestionPort):
                             continue
                         
                         # Transform and validate
+                        # Store original record_data before transformation (for raw vault)
+                        original_record_data = record_data.copy()
+                        
                         golden_record = self._triage_and_transform(record_data, source, record_count)
-                        yield Result.success_result(golden_record)
+                        
+                        # Return tuple (GoldenRecord, original_record_data) for raw vault support
+                        # main.py will handle converting GoldenRecord to DataFrame and using original_record_data as raw_df
+                        yield Result.success_result((golden_record, original_record_data))
                         
                         # Periodic garbage collection for very large files
                         if file_size > 75 * 1024 * 1024 and record_count % 500 == 0:
@@ -609,6 +615,9 @@ class XMLIngester(IngestionPort):
                     )
                     continue
                 
+                # Store original record_data before transformation (for raw vault)
+                original_record_data = record_data.copy()
+                
                 # Transform and validate record
                 golden_record = self._triage_and_transform(
                     record_data,
@@ -616,8 +625,9 @@ class XMLIngester(IngestionPort):
                     record_count
                 )
                 
-                # Yield success result
-                yield Result.success_result(golden_record)
+                # Yield success result with original data for raw vault
+                # Return tuple (GoldenRecord, original_record_data)
+                yield Result.success_result((golden_record, original_record_data))
                 
             except (ValidationError, TransformationError) as e:
                 # Security rejection: Log and return failure result

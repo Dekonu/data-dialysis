@@ -266,6 +266,9 @@ class JSONIngester(IngestionPort):
             chunk_df = df_all.iloc[current_start_idx:end_idx].copy()
             
             try:
+                # Capture original DataFrame BEFORE redaction (for raw vault)
+                original_df = chunk_df.copy()
+                
                 # Apply vectorized PII redaction
                 redacted_df = self._redact_dataframe(chunk_df)
                 
@@ -275,6 +278,19 @@ class JSONIngester(IngestionPort):
                     source,
                     chunk_count
                 )
+                
+                # Filter original_df to match validated_df (same indices)
+                # This ensures raw_df has the same rows as redacted_df after validation
+                if not validated_df.empty and len(failed_indices) > 0:
+                    # Remove failed indices from original_df
+                    original_df = original_df.drop(failed_indices)
+                elif validated_df.empty:
+                    # All records failed validation, original_df should be empty too
+                    original_df = original_df.iloc[0:0].copy()
+                
+                # Ensure original_df has same index as validated_df for alignment
+                if not validated_df.empty:
+                    original_df = original_df.reindex(validated_df.index)
                 
                 # Track failures
                 num_failed = len(failed_indices)
@@ -330,18 +346,71 @@ class JSONIngester(IngestionPort):
                         f"{num_valid} records passed"
                     )
                 
-                # Yield success result with validated patient DataFrame
+                # Create raw DataFrames for encounters and observations from original dictionaries
+                # These are created from the stored dictionaries which contain original unredacted data
+                encounters_raw_records = []
+                observations_raw_records = []
+                
+                # Build raw DataFrames from original dictionaries (before validation/redaction)
+                for patient_id in validated_df['patient_id'].values if not validated_df.empty else []:
+                    # Get original encounters for this patient
+                    if patient_id in self._patient_encounters:
+                        for enc_data in self._patient_encounters[patient_id]:
+                            # Create a flat record from the original encounter data
+                            enc_raw = enc_data.copy()
+                            enc_raw['patient_id'] = patient_id
+                            encounters_raw_records.append(enc_raw)
+                    
+                    # Get original observations for this patient
+                    if patient_id in self._patient_observations:
+                        for obs_data in self._patient_observations[patient_id]:
+                            # Create a flat record from the original observation data
+                            obs_raw = obs_data.copy()
+                            obs_raw['patient_id'] = patient_id
+                            observations_raw_records.append(obs_raw)
+                
+                # Create raw DataFrames
+                encounters_raw_df = pd.DataFrame(encounters_raw_records) if encounters_raw_records else pd.DataFrame()
+                observations_raw_df = pd.DataFrame(observations_raw_records) if observations_raw_records else pd.DataFrame()
+                
+                # Align raw DataFrames with validated DataFrames (match by primary keys)
+                if not encounters_df.empty and not encounters_raw_df.empty and 'encounter_id' in encounters_df.columns:
+                    # Merge to align indices
+                    encounters_raw_df = encounters_raw_df.merge(
+                        encounters_df[['encounter_id']].reset_index(),
+                        on='encounter_id',
+                        how='right'
+                    ).set_index('index') if 'encounter_id' in encounters_raw_df.columns else encounters_raw_df
+                
+                if not observations_df.empty and not observations_raw_df.empty and 'observation_id' in observations_df.columns:
+                    # Merge to align indices
+                    observations_raw_df = observations_raw_df.merge(
+                        observations_df[['observation_id']].reset_index(),
+                        on='observation_id',
+                        how='right'
+                    ).set_index('index') if 'observation_id' in observations_raw_df.columns else observations_raw_df
+                
+                # Yield success result with validated patient DataFrame and original DataFrame (for raw vault)
+                # Return as tuple: (redacted_df, raw_df)
                 if len(validated_df) > 0:
-                    yield Result.success_result(validated_df)
+                    yield Result.success_result((validated_df, original_df))
                 
-                # Yield encounters DataFrame if present
+                # Yield encounters DataFrame if present (with raw data)
                 if len(encounters_df) > 0:
-                    yield Result.success_result(encounters_df)
+                    if not encounters_raw_df.empty:
+                        yield Result.success_result((encounters_df, encounters_raw_df))
+                    else:
+                        # Fallback: use encounters_df as raw if no raw data available
+                        yield Result.success_result((encounters_df, encounters_df))
                 
-                # Yield observations DataFrame if present
+                # Yield observations DataFrame if present (with raw data)
                 if len(observations_df) > 0:
                     logger.info(f"Yielding observations DataFrame with {len(observations_df)} rows for chunk {chunk_count}")
-                    yield Result.success_result(observations_df)
+                    if not observations_raw_df.empty:
+                        yield Result.success_result((observations_df, observations_raw_df))
+                    else:
+                        # Fallback: use observations_df as raw if no raw data available
+                        yield Result.success_result((observations_df, observations_df))
                 else:
                     # Log if observations were expected but not found
                     total_obs_in_dict = sum(len(obs_list) for obs_list in self._patient_observations.values())

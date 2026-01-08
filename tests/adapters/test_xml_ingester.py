@@ -366,12 +366,17 @@ class TestXMLIngesterIngest:
             first_result = results[0]
             assert first_result.is_success()
             
-            # Check that it's a GoldenRecord
+            # Check that it's a tuple (GoldenRecord, original_record_data) for raw vault
             from src.domain.golden_record import GoldenRecord
-            assert isinstance(first_result.value, GoldenRecord)
+            assert isinstance(first_result.value, tuple)
+            assert len(first_result.value) == 2
+            
+            golden_record, original_record_data = first_result.value
+            assert isinstance(golden_record, GoldenRecord)
+            assert isinstance(original_record_data, dict)
             
             # Check patient data
-            assert first_result.value.patient.patient_id == "MRN001"
+            assert golden_record.patient.patient_id == "MRN001"
         finally:
             Path(temp_path).unlink()
     
@@ -428,9 +433,13 @@ class TestXMLIngesterIngest:
             first_result = results[0]
             assert first_result.is_success()
             
-            # Check GoldenRecord structure
-            golden_record = first_result.value
+            # Check that it's a tuple (GoldenRecord, original_record_data) for raw vault
+            assert isinstance(first_result.value, tuple)
+            assert len(first_result.value) == 2
+            
+            golden_record, original_record_data = first_result.value
             assert golden_record.patient.patient_id == "MRN001"
+            assert isinstance(original_record_data, dict)
             # Note: Encounter and observation mapping depends on FieldMapper
         finally:
             Path(temp_path).unlink()

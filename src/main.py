@@ -158,7 +158,10 @@ def process_ingestion(
     chunk_dataframes = {
         'patients': None,
         'encounters': None,
-        'observations': None
+        'observations': None,
+        'patients_raw': None,
+        'encounters_raw': None,
+        'observations_raw': None
     }
     
     # Phase 3: Parallel Chunk Processing
@@ -228,9 +231,18 @@ def process_ingestion(
                 
                 if result.is_success():
                     # Handle DataFrame results (CSV/JSON batch processing)
-                    if hasattr(result.value, 'shape'):  # pandas DataFrame
+                    # Check if result is a tuple (redacted_df, raw_df) for raw vault support
+                    if isinstance(result.value, tuple) and len(result.value) == 2:
+                        # New format: tuple with (redacted_df, raw_df)
+                        df, raw_df = result.value
+                        logger.info(f"Processing DataFrame batch: {len(df)} rows (with raw vault data)")
+                    elif hasattr(result.value, 'shape'):  # pandas DataFrame (backward compatibility)
                         df = result.value
+                        raw_df = None  # No raw data available (backward compatibility)
                         logger.info(f"Processing DataFrame batch: {len(df)} rows")
+                    else:
+                        # Not a DataFrame or tuple, skip
+                        continue
                         
                         # Determine table name based on columns
                         # Check for specific IDs first (observations/encounters have patient_id too)
@@ -318,7 +330,10 @@ def process_ingestion(
                                     )
                         
                         # Store DataFrame for parallel persistence
+                        # Also store raw DataFrame if available (for raw vault)
                         chunk_dataframes[table_name] = df
+                        if raw_df is not None:
+                            chunk_dataframes[f'{table_name}_raw'] = raw_df
                         
                         # Check if we have all 3 DataFrames for a complete chunk
                         # For JSON ingestion: chunk = patients + encounters + observations
@@ -340,10 +355,14 @@ def process_ingestion(
                         if has_complete_chunk:
                             # Phase 3: Parallel Chunk Processing
                             # Create a copy of the chunk dataframes for parallel processing
+                            # Include both redacted and raw DataFrames
                             chunk_to_process = {
-                                'patients': chunk_dataframes['patients'].copy(),
-                                'encounters': chunk_dataframes['encounters'].copy(),
-                                'observations': chunk_dataframes['observations'].copy()
+                                'patients': chunk_dataframes['patients'].copy() if chunk_dataframes['patients'] is not None else None,
+                                'encounters': chunk_dataframes['encounters'].copy() if chunk_dataframes['encounters'] is not None else None,
+                                'observations': chunk_dataframes['observations'].copy() if chunk_dataframes['observations'] is not None else None,
+                                'patients_raw': chunk_dataframes.get('patients_raw').copy() if chunk_dataframes.get('patients_raw') is not None else None,
+                                'encounters_raw': chunk_dataframes.get('encounters_raw').copy() if chunk_dataframes.get('encounters_raw') is not None else None,
+                                'observations_raw': chunk_dataframes.get('observations_raw').copy() if chunk_dataframes.get('observations_raw') is not None else None,
                             }
                             
                             chunk_number = len(pending_chunk_futures) + 1
@@ -462,10 +481,21 @@ def process_ingestion(
                                             ], ignore_index=True)
                                     
                                     # Step 2: Persist patients (including minimal ones)
-                                    patients_result = storage_adapter.persist_dataframe(
-                                        chunk_data['patients'],
-                                        'patients'
-                                    )
+                                    # Use persist_dataframe_smart with raw vault support if available
+                                    patients_raw_df = chunk_data.get('patients_raw')
+                                    if hasattr(storage_adapter, 'persist_dataframe_smart'):
+                                        patients_result = storage_adapter.persist_dataframe_smart(
+                                            chunk_data['patients'],
+                                            'patients',
+                                            raw_df=patients_raw_df,
+                                            ingestion_id=ingestion_id,
+                                            source_adapter=adapter.adapter_name
+                                        )
+                                    else:
+                                        patients_result = storage_adapter.persist_dataframe(
+                                            chunk_data['patients'],
+                                            'patients'
+                                        )
                                     if patients_result.is_success():
                                         chunk_success += patients_result.value
                                         logger.info(
@@ -482,15 +512,26 @@ def process_ingestion(
                                     # Step 2: Persist encounters and observations in parallel
                                     # (both depend on patients, but are independent of each other)
                                     with ThreadPoolExecutor(max_workers=2) as executor:
-                                        futures = {
-                                            executor.submit(
-                                                storage_adapter.persist_dataframe,
-                                                chunk_data[table],
-                                                table
-                                            ): (chunk_data[table], table)
-                                            for table in ['encounters', 'observations']
-                                            if chunk_data[table] is not None
-                                        }
+                                        futures = {}
+                                        for table in ['encounters', 'observations']:
+                                            if chunk_data[table] is not None:
+                                                raw_key = f'{table}_raw'
+                                                raw_df = chunk_data.get(raw_key)
+                                                if hasattr(storage_adapter, 'persist_dataframe_smart'):
+                                                    futures[executor.submit(
+                                                        storage_adapter.persist_dataframe_smart,
+                                                        chunk_data[table],
+                                                        table,
+                                                        raw_df=raw_df,
+                                                        ingestion_id=ingestion_id,
+                                                        source_adapter=adapter.adapter_name
+                                                    )] = (chunk_data[table], table)
+                                                else:
+                                                    futures[executor.submit(
+                                                        storage_adapter.persist_dataframe,
+                                                        chunk_data[table],
+                                                        table
+                                                    )] = (chunk_data[table], table)
                                         
                                         # Process results as they complete
                                         for future in as_completed(futures):
@@ -584,7 +625,10 @@ def process_ingestion(
                             chunk_dataframes = {
                                 'patients': None,
                                 'encounters': None,
-                                'observations': None
+                                'observations': None,
+                                'patients_raw': None,
+                                'encounters_raw': None,
+                                'observations_raw': None
                             }
                             chunk_tables_persisted.clear()
                         elif is_single_table_csv:
@@ -596,7 +640,17 @@ def process_ingestion(
                             )
                             
                             # Persist this DataFrame directly (no need to wait for other tables)
-                            persist_result = storage.persist_dataframe(df, table_name)
+                            # Use persist_dataframe_smart with raw vault support if available
+                            raw_df_for_table = chunk_dataframes.get(f'{table_name}_raw')
+                            if hasattr(storage, 'persist_dataframe_smart'):
+                                persist_result = storage.persist_dataframe_smart(
+                                    df, table_name,
+                                    raw_df=raw_df_for_table,
+                                    ingestion_id=ingestion_id,
+                                    source_adapter=adapter.adapter_name
+                                )
+                            else:
+                                persist_result = storage.persist_dataframe(df, table_name)
                             if persist_result.is_success():
                                 success_count += persist_result.value
                                 logger.info(f"Persisted {persist_result.value} rows to {table_name}")
@@ -629,12 +683,127 @@ def process_ingestion(
                     
                     # Handle GoldenRecord results (XML row-by-row processing)
                     else:
-                        golden_record = result.value
+                        # Check if result is tuple (GoldenRecord, original_record_data) for raw vault
+                        if isinstance(result.value, tuple) and len(result.value) == 2:
+                            golden_record, original_record_data = result.value
+                        else:
+                            # Backward compatibility: result.value is just GoldenRecord
+                            golden_record = result.value
+                            original_record_data = None
+                        
                         batch_records.append(golden_record)
+                        
+                        # Store original record data for raw vault (if available)
+                        if original_record_data is not None:
+                            if not hasattr(batch_records, '_raw_data'):
+                                batch_records._raw_data = []
+                            batch_records._raw_data.append(original_record_data)
                         
                         # Persist in batches for efficiency
                         if len(batch_records) >= (batch_size or settings.batch_size):
-                            persist_result = storage.persist_batch(batch_records)
+                            # For XML, convert GoldenRecords to DataFrames and use persist_dataframe_smart with raw vault
+                            if hasattr(storage, 'persist_dataframe_smart') and hasattr(batch_records, '_raw_data'):
+                                # Convert GoldenRecords to DataFrames
+                                import pandas as pd
+                                
+                                # Convert patients
+                                patients_data = []
+                                patients_raw_data = []
+                                for i, record in enumerate(batch_records):
+                                    patient_dict = record.patient.model_dump(exclude_none=False)
+                                    patient_dict['source_adapter'] = record.source_adapter
+                                    patient_dict['transformation_hash'] = record.transformation_hash
+                                    patients_data.append(patient_dict)
+                                    
+                                    # Get original patient data from raw_data
+                                    if i < len(batch_records._raw_data):
+                                        raw_data = batch_records._raw_data[i]
+                                        # Extract patient data from raw_data (may need field mapping)
+                                        raw_patient_data = raw_data.copy()  # Use original record_data as-is
+                                        patients_raw_data.append(raw_patient_data)
+                                
+                                patients_df = pd.DataFrame(patients_data)
+                                patients_raw_df = pd.DataFrame(patients_raw_data) if patients_raw_data else None
+                                
+                                # Convert encounters
+                                encounters_data = []
+                                encounters_raw_data = []
+                                for i, record in enumerate(batch_records):
+                                    for encounter in record.encounters:
+                                        enc_dict = encounter.model_dump(exclude_none=False)
+                                        enc_dict['ingestion_timestamp'] = record.ingestion_timestamp
+                                        enc_dict['source_adapter'] = record.source_adapter
+                                        enc_dict['transformation_hash'] = record.transformation_hash
+                                        encounters_data.append(enc_dict)
+                                        
+                                        # Get original encounter data from raw_data
+                                        if i < len(batch_records._raw_data):
+                                            raw_data = batch_records._raw_data[i]
+                                            # Extract encounter data (may need to reconstruct from original)
+                                            # For now, use the encounter dict as raw (it's already from original data)
+                                            raw_enc_data = enc_dict.copy()  # Fallback: use validated data
+                                            encounters_raw_data.append(raw_enc_data)
+                                
+                                encounters_df = pd.DataFrame(encounters_data) if encounters_data else pd.DataFrame()
+                                encounters_raw_df = pd.DataFrame(encounters_raw_data) if encounters_raw_data else None
+                                
+                                # Convert observations
+                                observations_data = []
+                                observations_raw_data = []
+                                for i, record in enumerate(batch_records):
+                                    for observation in record.observations:
+                                        obs_dict = observation.model_dump(exclude_none=False)
+                                        obs_dict['ingestion_timestamp'] = record.ingestion_timestamp
+                                        obs_dict['source_adapter'] = record.source_adapter
+                                        obs_dict['transformation_hash'] = record.transformation_hash
+                                        observations_data.append(obs_dict)
+                                        
+                                        # Get original observation data from raw_data
+                                        if i < len(batch_records._raw_data):
+                                            raw_data = batch_records._raw_data[i]
+                                            # Extract observation data (may need to reconstruct from original)
+                                            raw_obs_data = obs_dict.copy()  # Fallback: use validated data
+                                            observations_raw_data.append(raw_obs_data)
+                                
+                                observations_df = pd.DataFrame(observations_data) if observations_data else pd.DataFrame()
+                                observations_raw_df = pd.DataFrame(observations_raw_data) if observations_raw_data else None
+                                
+                                # Persist using persist_dataframe_smart with raw vault
+                                total_persisted = 0
+                                if not patients_df.empty:
+                                    result_patients = storage.persist_dataframe_smart(
+                                        patients_df, 'patients',
+                                        raw_df=patients_raw_df,
+                                        ingestion_id=ingestion_id,
+                                        source_adapter=adapter.adapter_name
+                                    )
+                                    if result_patients.is_success():
+                                        total_persisted += result_patients.value
+                                
+                                if not encounters_df.empty:
+                                    result_encounters = storage.persist_dataframe_smart(
+                                        encounters_df, 'encounters',
+                                        raw_df=encounters_raw_df,
+                                        ingestion_id=ingestion_id,
+                                        source_adapter=adapter.adapter_name
+                                    )
+                                    if result_encounters.is_success():
+                                        total_persisted += result_encounters.value
+                                
+                                if not observations_df.empty:
+                                    result_observations = storage.persist_dataframe_smart(
+                                        observations_df, 'observations',
+                                        raw_df=observations_raw_df,
+                                        ingestion_id=ingestion_id,
+                                        source_adapter=adapter.adapter_name
+                                    )
+                                    if result_observations.is_success():
+                                        total_persisted += result_observations.value
+                                
+                                persist_result = Result.success_result(total_persisted) if total_persisted > 0 else Result.success_result(len(batch_records))
+                            else:
+                                # Fallback to standard persist_batch
+                                persist_result = storage.persist_batch(batch_records)
                             if persist_result.is_success():
                                 success_count += len(batch_records)
                                 logger.info(f"Persisted batch of {len(batch_records)} records")
@@ -709,7 +878,16 @@ def process_ingestion(
                 )
                 for table_name in remaining_tables:
                     df = chunk_dataframes[table_name]
-                    persist_result = storage.persist_dataframe(df, table_name)
+                    raw_df_for_table = chunk_dataframes.get(f'{table_name}_raw')
+                    if hasattr(storage, 'persist_dataframe_smart'):
+                        persist_result = storage.persist_dataframe_smart(
+                            df, table_name,
+                            raw_df=raw_df_for_table,
+                            ingestion_id=ingestion_id,
+                            source_adapter=adapter.adapter_name
+                        )
+                    else:
+                        persist_result = storage.persist_dataframe(df, table_name)
                     if persist_result.is_success():
                         success_count += persist_result.value
                         logger.info(f"Persisted {persist_result.value} rows to {table_name}")

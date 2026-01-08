@@ -547,3 +547,228 @@ class TestCanIngest:
         assert ingester.can_ingest('') is False
         assert ingester.can_ingest(None) is False
 
+
+class TestRawVaultSupport:
+    """Test raw vault support in CSV ingester.
+    
+    Tests verify that the CSV ingester:
+    - Captures original DataFrame before redaction
+    - Returns tuple (redacted_df, raw_df) for raw vault
+    - Filters original_df to match validated records
+    """
+    
+    def test_ingest_returns_tuple_with_raw_df(self):
+        """Test that ingest returns tuple (redacted_df, raw_df) for raw vault."""
+        ingester = CSVIngester()
+        
+        # Create temporary CSV file with PII
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False) as f:
+            f.write('patient_id,first_name,last_name,ssn,phone,email\n')
+            f.write('MRN001,John,Doe,123-45-6789,555-123-4567,john@example.com\n')
+            f.write('MRN002,Jane,Smith,987-65-4321,555-987-6543,jane@example.com\n')
+            temp_path = f.name
+        
+        try:
+            results = list(ingester.ingest(temp_path))
+            
+            # Should have at least one successful result
+            assert len(results) > 0
+            success_results = [r for r in results if r.is_success()]
+            assert len(success_results) > 0
+            
+            # Check that result value is a tuple
+            first_result = success_results[0]
+            assert isinstance(first_result.value, tuple)
+            assert len(first_result.value) == 2
+            
+            # Unpack tuple
+            redacted_df, raw_df = first_result.value
+            
+            # Verify both are DataFrames
+            assert isinstance(redacted_df, pd.DataFrame)
+            assert isinstance(raw_df, pd.DataFrame)
+            
+            # Verify redacted_df has redacted values
+            if 'ssn' in redacted_df.columns:
+                assert all(redacted_df['ssn'] == RedactorService.SSN_MASK)
+            if 'first_name' in redacted_df.columns:
+                assert all(redacted_df['first_name'] == RedactorService.NAME_MASK)
+            
+            # Verify raw_df has original values (not redacted)
+            if 'ssn' in raw_df.columns:
+                assert any(raw_df['ssn'] != RedactorService.SSN_MASK)
+                assert '123-45-6789' in raw_df['ssn'].values or '987-65-4321' in raw_df['ssn'].values
+            if 'first_name' in raw_df.columns:
+                assert any(raw_df['first_name'] != RedactorService.NAME_MASK)
+                assert 'John' in raw_df['first_name'].values or 'Jane' in raw_df['first_name'].values
+            
+        finally:
+            os.unlink(temp_path)
+    
+    def test_raw_df_matches_validated_df_indices(self):
+        """Test that raw_df has same indices as validated_df after filtering."""
+        ingester = CSVIngester()
+        
+        # Create CSV with some invalid records (missing patient_id)
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False) as f:
+            f.write('patient_id,first_name,last_name,gender\n')
+            f.write('MRN001,John,Doe,male\n')
+            f.write(',Jane,Smith,female\n')  # Missing patient_id - will fail validation
+            f.write('MRN003,Bob,Johnson,male\n')
+            temp_path = f.name
+        
+        try:
+            results = list(ingester.ingest(temp_path))
+            success_results = [r for r in results if r.is_success()]
+            
+            if success_results:
+                redacted_df, raw_df = success_results[0].value
+                
+                # Both DataFrames should have same number of rows (failed records filtered out)
+                assert len(redacted_df) == len(raw_df)
+                
+                # Both should have same index alignment
+                assert list(redacted_df.index) == list(raw_df.index)
+                
+                # Both should have same patient_ids (only valid ones, no NaN)
+                redacted_patient_ids = set(redacted_df['patient_id'].dropna().values)
+                raw_patient_ids = set(raw_df['patient_id'].dropna().values)
+                assert redacted_patient_ids == raw_patient_ids
+                assert 'MRN001' in redacted_patient_ids
+                assert 'MRN003' in redacted_patient_ids
+                # Invalid record should be filtered out
+                assert len(redacted_df) == 2  # Only 2 valid records
+                
+        finally:
+            os.unlink(temp_path)
+    
+    def test_raw_df_preserves_original_pii_values(self):
+        """Test that raw_df preserves original PII values before redaction."""
+        ingester = CSVIngester()
+        
+        # Create CSV with various PII fields
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False) as f:
+            f.write('patient_id,first_name,last_name,ssn,phone,email,address_line1\n')
+            f.write('MRN001,John,Doe,123-45-6789,555-123-4567,john@example.com,123 Main St\n')
+            temp_path = f.name
+        
+        try:
+            results = list(ingester.ingest(temp_path))
+            success_results = [r for r in results if r.is_success()]
+            
+            if success_results:
+                redacted_df, raw_df = success_results[0].value
+                
+                # Verify redacted_df has redacted values
+                if 'ssn' in redacted_df.columns:
+                    assert redacted_df['ssn'].iloc[0] == RedactorService.SSN_MASK
+                if 'first_name' in redacted_df.columns:
+                    assert redacted_df['first_name'].iloc[0] == RedactorService.NAME_MASK
+                if 'phone' in redacted_df.columns:
+                    assert redacted_df['phone'].iloc[0] == RedactorService.PHONE_MASK
+                if 'email' in redacted_df.columns:
+                    assert redacted_df['email'].iloc[0] == RedactorService.EMAIL_MASK
+                
+                # Verify raw_df has original values
+                if 'ssn' in raw_df.columns:
+                    assert raw_df['ssn'].iloc[0] == '123-45-6789'
+                if 'first_name' in raw_df.columns:
+                    assert raw_df['first_name'].iloc[0] == 'John'
+                if 'last_name' in raw_df.columns:
+                    assert raw_df['last_name'].iloc[0] == 'Doe'
+                if 'phone' in raw_df.columns:
+                    assert raw_df['phone'].iloc[0] == '555-123-4567'
+                if 'email' in raw_df.columns:
+                    assert raw_df['email'].iloc[0] == 'john@example.com'
+                if 'address_line1' in raw_df.columns:
+                    assert raw_df['address_line1'].iloc[0] == '123 Main St'
+                
+        finally:
+            os.unlink(temp_path)
+    
+    def test_raw_df_handles_empty_validated_df(self):
+        """Test that raw_df is empty when all records fail validation."""
+        ingester = CSVIngester()
+        
+        # Create CSV with all invalid records (no patient_id)
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False) as f:
+            f.write('first_name,last_name\n')  # Missing patient_id
+            f.write('John,Doe\n')
+            f.write('Jane,Smith\n')
+            temp_path = f.name
+        
+        try:
+            results = list(ingester.ingest(temp_path))
+            success_results = [r for r in results if r.is_success()]
+            
+            # If all records fail validation, we may not get success results
+            # But if we do, raw_df should be empty too
+            if success_results:
+                redacted_df, raw_df = success_results[0].value
+                assert len(redacted_df) == len(raw_df)
+                if len(redacted_df) == 0:
+                    assert len(raw_df) == 0
+                    
+        finally:
+            os.unlink(temp_path)
+    
+    def test_raw_df_works_with_encounters_csv(self):
+        """Test raw vault support with encounters CSV."""
+        ingester = CSVIngester()
+        
+        # Create encounters CSV
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False) as f:
+            f.write('encounter_id,patient_id,status,class_code,period_start\n')
+            f.write('ENC001,MRN001,finished,inpatient,2025-01-01T00:00:00\n')
+            f.write('ENC002,MRN002,in-progress,ambulatory,2025-01-02T00:00:00\n')
+            temp_path = f.name
+        
+        try:
+            results = list(ingester.ingest(temp_path))
+            success_results = [r for r in results if r.is_success()]
+            
+            if success_results:
+                redacted_df, raw_df = success_results[0].value
+                
+                # Both should be DataFrames
+                assert isinstance(redacted_df, pd.DataFrame)
+                assert isinstance(raw_df, pd.DataFrame)
+                
+                # Both should have same structure
+                assert len(redacted_df) == len(raw_df)
+                assert 'encounter_id' in redacted_df.columns
+                assert 'encounter_id' in raw_df.columns
+                
+        finally:
+            os.unlink(temp_path)
+    
+    def test_raw_df_works_with_observations_csv(self):
+        """Test raw vault support with observations CSV."""
+        ingester = CSVIngester()
+        
+        # Create observations CSV
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False) as f:
+            f.write('observation_id,patient_id,category,code,value,unit\n')
+            f.write('OBS001,MRN001,vital-signs,85354-9,120/80,mmHg\n')
+            f.write('OBS002,MRN002,laboratory,718-7,14.5,g/dL\n')
+            temp_path = f.name
+        
+        try:
+            results = list(ingester.ingest(temp_path))
+            success_results = [r for r in results if r.is_success()]
+            
+            if success_results:
+                redacted_df, raw_df = success_results[0].value
+                
+                # Both should be DataFrames
+                assert isinstance(redacted_df, pd.DataFrame)
+                assert isinstance(raw_df, pd.DataFrame)
+                
+                # Both should have same structure
+                assert len(redacted_df) == len(raw_df)
+                assert 'observation_id' in redacted_df.columns
+                assert 'observation_id' in raw_df.columns
+                
+        finally:
+            os.unlink(temp_path)
+

@@ -336,14 +336,21 @@ class TestJSONIngesterIngest:
             assert len(results) > 0
             assert all(r.is_success() for r in results)
             
-            # Check first result is a DataFrame
+            # Check first result is a tuple (redacted_df, raw_df) for raw vault
             first_result = results[0]
-            assert isinstance(first_result.value, pd.DataFrame)
+            assert isinstance(first_result.value, tuple)
+            assert len(first_result.value) == 2
+            
+            # Unpack tuple
+            redacted_df, raw_df = first_result.value
+            
+            # Check both are DataFrames
+            assert isinstance(redacted_df, pd.DataFrame)
+            assert isinstance(raw_df, pd.DataFrame)
             
             # Check patient data is present
-            df = first_result.value
-            assert len(df) > 0
-            assert 'patient_id' in df.columns
+            assert len(redacted_df) > 0
+            assert 'patient_id' in redacted_df.columns
         finally:
             Path(temp_path).unlink()
     
@@ -388,14 +395,18 @@ class TestJSONIngesterIngest:
             results = list(ingester.ingest(temp_path))
             
             # Should yield multiple DataFrames (patients, encounters, observations)
+            # Each result is now a tuple (redacted_df, raw_df)
             assert len(results) >= 1
             
             # All results should be successful
             assert all(r.is_success() for r in results)
             
-            # Check that we have patients DataFrame
-            patients_df = results[0].value
+            # Check that we have patients DataFrame (first result should be patients)
+            patients_result = results[0]
+            assert isinstance(patients_result.value, tuple)
+            patients_df, patients_raw_df = patients_result.value
             assert isinstance(patients_df, pd.DataFrame)
+            assert isinstance(patients_raw_df, pd.DataFrame)
             assert len(patients_df) > 0
         finally:
             Path(temp_path).unlink()

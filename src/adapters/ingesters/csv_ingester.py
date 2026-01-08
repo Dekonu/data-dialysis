@@ -285,6 +285,9 @@ class CSVIngester(IngestionPort):
                     # Map CSV columns to domain model fields
                     mapped_df = self._map_dataframe_columns(chunk_df, column_mapping)
                     
+                    # Capture original DataFrame BEFORE redaction (for raw vault)
+                    original_df = mapped_df.copy()
+                    
                     # Apply vectorized PII redaction
                     redacted_df = self._redact_dataframe(mapped_df)
                     
@@ -295,6 +298,24 @@ class CSVIngester(IngestionPort):
                         chunk_count,
                         csv_type=self._detected_csv_type
                     )
+                    
+                    # Filter original_df to match validated_df (same rows)
+                    # This ensures raw_df has the same rows as redacted_df after validation
+                    # Note: validated_df is created from valid_records with a new default index,
+                    # so we need to filter original_df by excluding failed_indices
+                    if validated_df.empty:
+                        # All records failed validation, original_df should be empty too
+                        original_df = original_df.iloc[0:0].copy()
+                    elif len(failed_indices) > 0:
+                        # Some records failed - remove failed indices from original_df
+                        # Then reindex to match validated_df (which has a new default index)
+                        original_df = original_df.drop(failed_indices)
+                        # Reset index to match validated_df's default integer index
+                        original_df = original_df.reset_index(drop=True)
+                        # validated_df also has a default integer index, so they should align now
+                    else:
+                        # No failures - just reset index to match validated_df
+                        original_df = original_df.reset_index(drop=True)
                     
                     # Track failures
                     num_failed = len(failed_indices)
@@ -335,9 +356,10 @@ class CSVIngester(IngestionPort):
                             f"{num_valid} records passed"
                         )
                     
-                    # Yield success result with validated DataFrame
+                    # Yield success result with validated DataFrame and original DataFrame (for raw vault)
+                    # Return as tuple: (redacted_df, raw_df)
                     if len(validated_df) > 0:
-                        yield Result.success_result(validated_df)
+                        yield Result.success_result((validated_df, original_df))
                     
                     # Yield failure result if entire chunk failed
                     if num_failed == len(chunk_df) and num_valid == 0:
