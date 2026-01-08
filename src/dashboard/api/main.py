@@ -17,7 +17,8 @@ from src.dashboard.api.routes import (
     metrics,
     audit,
     circuit_breaker,
-    websocket
+    websocket,
+    change_history,
 )
 
 # Configure structured logging
@@ -77,6 +78,8 @@ app.include_router(metrics.router)
 app.include_router(audit.router)
 app.include_router(circuit_breaker.router)
 app.include_router(websocket.router)
+app.include_router(change_history.router)
+app.include_router(change_history.router)
 
 
 @app.get("/")
