@@ -105,7 +105,7 @@ export function RealtimePerformanceMetrics({
           <MetricsCard
             title="Average Latency"
             value={formatLatency(metrics.latency.avg_processing_time_ms)}
-            description="Mean processing time"
+            description="Mean time per batch"
             variant="default"
             formatType="plain"
           />
@@ -113,7 +113,7 @@ export function RealtimePerformanceMetrics({
           <MetricsCard
             title="P50 Latency"
             value={formatLatency(metrics.latency.p50_ms)}
-            description="Median processing time"
+            description="Median time per batch"
             variant="default"
             formatType="plain"
           />
@@ -121,7 +121,7 @@ export function RealtimePerformanceMetrics({
           <MetricsCard
             title="P95 Latency"
             value={formatLatency(metrics.latency.p95_ms)}
-            description="95th percentile"
+            description="95th percentile per batch"
             variant="default"
             formatType="plain"
           />
@@ -129,7 +129,7 @@ export function RealtimePerformanceMetrics({
           <MetricsCard
             title="P99 Latency"
             value={formatLatency(metrics.latency.p99_ms)}
-            description="99th percentile"
+            description="99th percentile per batch"
             variant="default"
             formatType="plain"
           />
@@ -240,7 +240,7 @@ export function RealtimePerformanceMetrics({
         <Card>
           <CardHeader>
             <CardTitle>Latency Percentiles</CardTitle>
-            <CardDescription>Processing time distribution</CardDescription>
+            <CardDescription>Batch processing time distribution</CardDescription>
           </CardHeader>
           <CardContent>
             <div className="space-y-2">
