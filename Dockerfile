@@ -8,7 +8,9 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     postgresql-client \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && rm -rf /var/cache/apt/archives/* \
+    && rm -rf /tmp/* /var/tmp/*
 
 # Copy requirements and install dependencies
 COPY requirements.txt .
@@ -22,7 +24,9 @@ WORKDIR /app
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     postgresql-client \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && rm -rf /var/cache/apt/archives/* \
+    && rm -rf /tmp/* /var/tmp/*
 
 # Create non-root user for security (before copying dependencies)
 RUN useradd -m -u 1000 appuser
@@ -40,6 +44,15 @@ COPY pytest.ini .
 
 # Change ownership of app directory and dependencies
 RUN chown -R appuser:appuser /app /home/appuser/.local
+
+# Clean up Python bytecode caches and other temporary files
+RUN find /app -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true \
+    && find /app -type f -name "*.pyc" -delete 2>/dev/null || true \
+    && find /app -type f -name "*.pyo" -delete 2>/dev/null || true \
+    && find /home/appuser/.local -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true \
+    && find /home/appuser/.local -type f -name "*.pyc" -delete 2>/dev/null || true \
+    && rm -rf /tmp/* /var/tmp/* \
+    && rm -rf /root/.cache 2>/dev/null || true
 
 # Switch to non-root user
 USER appuser
