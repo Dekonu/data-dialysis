@@ -19,6 +19,33 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" suppressHydrationWarning>
+      <head>
+        {/* Runtime API URL configuration - auto-detects from current host */}
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `
+              (function() {
+                // Auto-detect API URL from current hostname
+                const hostname = window.location.hostname;
+                const protocol = window.location.protocol;
+                
+                // If not localhost, use same hostname with port 8000
+                if (hostname && hostname !== 'localhost' && hostname !== '127.0.0.1') {
+                  const apiUrl = protocol === 'https:' 
+                    ? 'https://' + hostname + ':8000'
+                    : 'http://' + hostname + ':8000';
+                  window.__API_URL__ = apiUrl;
+                  window.__WS_URL__ = apiUrl.replace(/^https?:/, protocol === 'https:' ? 'wss:' : 'ws:');
+                } else {
+                  // Fallback to build-time env or default
+                  window.__API_URL__ = '${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}';
+                  window.__WS_URL__ = '${process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8000'}';
+                }
+              })();
+            `,
+          }}
+        />
+      </head>
       <body className={inter.className} suppressHydrationWarning>
         <ThemeProvider>
           <div className="min-h-screen bg-background transition-colors">

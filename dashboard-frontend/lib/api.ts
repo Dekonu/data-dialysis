@@ -11,7 +11,33 @@ import type {
   RecordChangeHistoryResponse,
 } from '@/types/api';
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+// Get API URL at runtime - works for both build-time and runtime configuration
+// Priority: window.__API_URL__ (runtime) > NEXT_PUBLIC_API_URL (build-time) > default
+function getApiBaseUrl(): string {
+  // Runtime configuration (set via window object or script tag)
+  if (typeof window !== 'undefined' && (window as any).__API_URL__) {
+    return (window as any).__API_URL__;
+  }
+  
+  // Build-time configuration
+  if (process.env.NEXT_PUBLIC_API_URL) {
+    return process.env.NEXT_PUBLIC_API_URL;
+  }
+  
+  // Auto-detect from current host (for same-origin deployments)
+  if (typeof window !== 'undefined') {
+    const host = window.location.hostname;
+    // If accessing from EC2, use the same hostname but port 8000
+    if (host && host !== 'localhost' && host !== '127.0.0.1') {
+      return `http://${host}:8000`;
+    }
+  }
+  
+  // Default fallback
+  return 'http://localhost:8000';
+}
+
+const API_BASE_URL = getApiBaseUrl();
 
 export interface HealthResponse {
   status: 'healthy' | 'degraded' | 'unhealthy';

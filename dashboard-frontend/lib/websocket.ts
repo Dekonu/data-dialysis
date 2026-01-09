@@ -14,6 +14,12 @@ import type {
 
 // Determine WebSocket URL based on API URL
 const getWebSocketUrl = (): string => {
+  // Runtime configuration (set via window object)
+  if (typeof window !== 'undefined' && (window as any).__WS_URL__) {
+    return (window as any).__WS_URL__;
+  }
+  
+  // Build-time configuration
   const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
   
   // Convert http:// to ws:// and https:// to wss://
