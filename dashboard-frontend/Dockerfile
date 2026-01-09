@@ -21,9 +21,15 @@ COPY --from=deps /app/node_modules ./node_modules
 # Copy source code
 COPY . .
 
+# Accept build arguments for API URLs (required for EC2 deployments)
+ARG NEXT_PUBLIC_API_URL=http://api:8000
+ARG NEXT_PUBLIC_WS_URL=ws://api:8000
+
 # Set environment variables for build
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV NODE_ENV=production
+ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
+ENV NEXT_PUBLIC_WS_URL=${NEXT_PUBLIC_WS_URL}
 
 # Build application
 RUN npm run build

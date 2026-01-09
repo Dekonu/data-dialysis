@@ -75,13 +75,14 @@ services:
     build:
       context: ./dashboard-frontend
       dockerfile: Dockerfile
+      args:
+        # Build-time args (embedded in Next.js bundle)
+        # For EC2: Set these to your EC2 public IP or domain
+        # Example: NEXT_PUBLIC_API_URL=http://<EC2_IP>:8000
+        # IMPORTANT: These must be set at BUILD time, not runtime
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://api:8000}
+        NEXT_PUBLIC_WS_URL: ${NEXT_PUBLIC_WS_URL:-ws://api:8000}
     container_name: datadialysis-frontend
-    environment:
-      # For EC2: Set these to your EC2 public IP or domain
-      # Example: NEXT_PUBLIC_API_URL=http://<EC2_IP>:8000
-      # Or use service name for internal Docker networking: http://api:8000
-      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://api:8000}
-      NEXT_PUBLIC_WS_URL: ${NEXT_PUBLIC_WS_URL:-ws://api:8000}
     ports:
       - "${FRONTEND_PORT:-3000}:3000"
     depends_on:
