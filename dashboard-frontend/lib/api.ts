@@ -28,19 +28,28 @@ export async function apiRequest<T>(
   endpoint: string,
   options?: RequestInit
 ): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}${endpoint}`, {
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options?.headers,
-    },
-  });
+  try {
+    const response = await fetch(`${API_BASE_URL}${endpoint}`, {
+      ...options,
+      headers: {
+        'Content-Type': 'application/json',
+        ...options?.headers,
+      },
+    });
 
-  if (!response.ok) {
-    throw new Error(`API error: ${response.statusText}`);
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => response.statusText);
+      throw new Error(`API error: ${response.status} ${errorText}`);
+    }
+
+    return response.json();
+  } catch (error) {
+    // Re-throw with more context if it's a network error
+    if (error instanceof TypeError && error.message.includes('fetch')) {
+      throw new Error(`Network error: Failed to connect to ${API_BASE_URL}${endpoint}`);
+    }
+    throw error;
   }
-
-  return response.json();
 }
 
 export const api = {
