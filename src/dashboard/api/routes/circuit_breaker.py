@@ -9,7 +9,7 @@ router = APIRouter(prefix="/api/circuit-breaker", tags=["circuit-breaker"])
 
 
 @router.get("/status")
-async def get_circuit_breaker_status(storage: StorageDep = None):
+async def get_circuit_breaker_status(storage: StorageDep):
     """Get circuit breaker status.
     
     Returns the current status of the circuit breaker, including:
