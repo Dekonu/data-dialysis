@@ -26,15 +26,28 @@ async def get_circuit_breaker_status(storage: StorageDep):
     if no active circuit breaker instance is available.
     """
     try:
+        logger.debug("Circuit breaker status endpoint called")
         service = CircuitBreakerService(storage)
         result = service.get_status()
         
         if result.is_success():
+            logger.debug("Circuit breaker status retrieved successfully")
             return result.value
         else:
-            logger.error(f"Circuit breaker service error: {result.error}")
-            raise HTTPException(status_code=500, detail=str(result.error))
+            error_msg = str(result.error)
+            logger.error(f"Circuit breaker service error: {error_msg}")
+            raise HTTPException(
+                status_code=500, 
+                detail=f"Circuit breaker service error: {error_msg}"
+            )
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
     except Exception as e:
-        logger.error(f"Unexpected error in circuit breaker endpoint: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to get circuit breaker status: {str(e)}")
+        error_msg = f"Unexpected error in circuit breaker endpoint: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Failed to get circuit breaker status: {str(e)}"
+        )
 
