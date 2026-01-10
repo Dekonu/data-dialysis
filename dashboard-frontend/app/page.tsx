@@ -5,6 +5,10 @@ import { Badge } from '@/components/ui/badge';
 import { TimeRangeSelector } from '@/components/dashboard/time-range-selector';
 import type { TimeRange } from '@/types/api';
 
+// Force dynamic rendering - don't statically generate this page
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 // Lazy load heavy components for better initial load performance
 const RealtimeMetrics = lazy(() => 
   import('@/components/dashboard/realtime-metrics').then(mod => ({ default: mod.RealtimeMetrics }))

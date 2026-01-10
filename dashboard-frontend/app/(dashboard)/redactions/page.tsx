@@ -13,6 +13,10 @@ import { Badge } from '@/components/ui/badge';
 import { TimeRangeSelector } from '@/components/dashboard/time-range-selector';
 import type { TimeRange } from '@/types/api';
 
+// Force dynamic rendering - don't statically generate this page
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 interface RedactionLogsContentProps {
   searchParams: Promise<{
     timeRange?: TimeRange;
