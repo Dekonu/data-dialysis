@@ -1,4 +1,5 @@
-# Multi-stage build for Next.js frontend
+# Optimized multi-stage build for Next.js frontend with BuildKit cache mounts
+# syntax=docker/dockerfile:1.4
 # Stage 1: Dependencies
 FROM node:20-alpine AS deps
 
@@ -7,8 +8,9 @@ WORKDIR /app
 # Copy package files
 COPY package.json package-lock.json* ./
 
-# Install dependencies
-RUN npm ci
+# Install dependencies with cache mount (reduces rebuild time and space)
+RUN --mount=type=cache,target=/root/.npm,sharing=locked \
+    npm ci --prefer-offline --no-audit
 
 # Stage 2: Builder
 FROM node:20-alpine AS builder
@@ -31,8 +33,10 @@ ENV NODE_ENV=production
 ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
 ENV NEXT_PUBLIC_WS_URL=${NEXT_PUBLIC_WS_URL}
 
-# Build application
-RUN npm run build
+# Build application with cache mount
+RUN --mount=type=cache,target=/app/.next/cache,sharing=locked \
+    npm run build \
+    && rm -rf node_modules .next/cache
 
 # Stage 3: Runner
 FROM node:20-alpine AS runner
@@ -46,13 +50,10 @@ ENV NEXT_TELEMETRY_DISABLED=1
 RUN addgroup --system --gid 1001 nodejs && \
     adduser --system --uid 1001 nextjs
 
-# Copy necessary files
-COPY --from=builder /app/public ./public
-COPY --from=builder /app/.next/standalone ./
-COPY --from=builder /app/.next/static ./.next/static
-
-# Set ownership
-RUN chown -R nextjs:nodejs /app
+# Copy only necessary files from builder
+COPY --from=builder --chown=nextjs:nodejs /app/public ./public
+COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
+COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 
 USER nextjs
 
