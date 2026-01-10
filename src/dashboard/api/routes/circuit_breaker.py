@@ -5,6 +5,7 @@ import logging
 from fastapi import APIRouter, HTTPException
 
 from src.dashboard.api.dependencies import StorageDep
+from src.dashboard.models.circuit_breaker import CircuitBreakerStatus
 from src.dashboard.services.circuit_breaker_service import CircuitBreakerService
 
 logger = logging.getLogger(__name__)
@@ -12,8 +13,8 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/circuit-breaker", tags=["circuit-breaker"])
 
 
-@router.get("/status")
-async def get_circuit_breaker_status(storage: StorageDep):
+@router.get("/status", response_model=CircuitBreakerStatus)
+async def get_circuit_breaker_status(storage: StorageDep) -> CircuitBreakerStatus:
     """Get circuit breaker status.
     
     Returns the current status of the circuit breaker, including:
@@ -31,8 +32,15 @@ async def get_circuit_breaker_status(storage: StorageDep):
         result = service.get_status()
         
         if result.is_success():
-            logger.debug("Circuit breaker status retrieved successfully")
-            return result.value
+            status = result.value
+            if status is None:
+                logger.error("Circuit breaker service returned None")
+                raise HTTPException(
+                    status_code=500,
+                    detail="Circuit breaker status is None"
+                )
+            logger.debug(f"Circuit breaker status retrieved successfully: is_open={status.is_open}, failure_rate={status.failure_rate}")
+            return status
         else:
             error_msg = str(result.error)
             logger.error(f"Circuit breaker service error: {error_msg}")
