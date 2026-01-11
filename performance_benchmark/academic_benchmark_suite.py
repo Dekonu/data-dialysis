@@ -171,14 +171,29 @@ def generate_test_files(
             if format_type == "csv":
                 # CSV generates multiple files, use patients file as primary
                 file_path = output_dir / f"test_{format_type}_{int(size_mb)}mb_patients.csv"
+                # Also track related CSV files for cleanup
+                encounters_path = output_dir / f"test_{format_type}_{int(size_mb)}mb_encounters.csv"
+                observations_path = output_dir / f"test_{format_type}_{int(size_mb)}mb_observations.csv"
             else:
                 file_path = output_dir / f"test_{format_type}_{int(size_mb)}mb.{format_type}"
+                encounters_path = None
+                observations_path = None
             
             # Skip if file exists and not forcing regeneration
             if file_path.exists() and not force_regenerate:
                 logger.info(f"  Skipping {file_path.name} (already exists)")
                 files[format_type][size_mb] = file_path
                 continue
+            
+            # Clean up old files if regenerating
+            if force_regenerate and file_path.exists():
+                logger.debug(f"  Removing old file: {file_path}")
+                file_path.unlink()
+                # Also clean up CSV-related files
+                if format_type == "csv":
+                    for related_file in [encounters_path, observations_path]:
+                        if related_file and related_file.exists():
+                            related_file.unlink()
             
             logger.info(f"  Generating {size_mb}MB {format_type.upper()} file...")
             
@@ -194,24 +209,29 @@ def generate_test_files(
                 elif format_type == "json":
                     # Estimate records needed - JSON generation may need iteration to hit target size
                     num_records = estimate_records_for_size(size_mb, format_type)
-                    generate_json_file(
-                        output_path=file_path,
-                        num_records=num_records
-                    )
-                    # Check actual size and adjust if needed
-                    actual_size_mb = file_path.stat().st_size / (1024 * 1024)
-                    if abs(actual_size_mb - size_mb) / size_mb > 0.2:  # More than 20% off
-                        # Adjust and regenerate
-                        adjustment_factor = size_mb / actual_size_mb
-                        num_records = int(num_records * adjustment_factor)
+                    # Only regenerate once if needed, with better estimation
+                    max_iterations = 2  # Limit to 2 iterations max
+                    for iteration in range(max_iterations):
                         generate_json_file(
                             output_path=file_path,
                             num_records=num_records
                         )
+                        # Check actual size and adjust if needed
+                        actual_size_mb = file_path.stat().st_size / (1024 * 1024)
+                        size_diff_pct = abs(actual_size_mb - size_mb) / size_mb
+                        
+                        if size_diff_pct <= 0.2:  # Within 20% tolerance
+                            break
+                        
+                        if iteration < max_iterations - 1:
+                            # Adjust for next iteration
+                            adjustment_factor = size_mb / actual_size_mb
+                            num_records = int(num_records * adjustment_factor)
+                            logger.debug(f"    Size {actual_size_mb:.2f}MB off target, adjusting to {num_records} records")
                     files[format_type][size_mb] = file_path
                     
                 elif format_type == "csv":
-                    # CSV generates multiple files
+                    # CSV generates multiple files - we'll track all of them
                     base_path = output_dir / f"test_{format_type}_{int(size_mb)}mb"
                     num_records = estimate_records_for_size(size_mb, format_type)
                     generate_csv_file(
@@ -219,11 +239,18 @@ def generate_test_files(
                         num_records=num_records,
                         format_type="flat"
                     )
-                    # Use patients file as primary
+                    # Use patients file as primary (other files are created but not tracked)
                     files[format_type][size_mb] = base_path.parent / f"{base_path.stem}_patients.csv"
                     
             except Exception as e:
                 logger.error(f"  Failed to generate {file_path}: {e}")
+                # Clean up partial files on error
+                if file_path.exists():
+                    file_path.unlink()
+                if format_type == "csv":
+                    for related_file in [encounters_path, observations_path]:
+                        if related_file and related_file.exists():
+                            related_file.unlink()
                 continue
     
     return files
@@ -830,7 +857,8 @@ def run_benchmark_suite(
     use_storage: bool = True,
     include_bad_data: bool = False,
     include_xml_performance: bool = False,
-    failure_rates: List[float] = [25, 50, 75, 90]
+    failure_rates: List[float] = [25, 50, 75, 90],
+    output_dir: Optional[Path] = None
 ) -> List[BenchmarkMetrics]:
     """Run complete benchmark suite and save results to CSV.
     
@@ -909,12 +937,13 @@ def run_benchmark_suite(
         logger.info("Testing Bad Data Scenarios (Circuit Breaker)")
         logger.info(f"{'=' * 80}")
         
-        bad_data_dir = project_root / "test_data" / "bad_data"
+        # Use same output directory as main test files to avoid file proliferation
+        bad_data_dir = (output_dir / "bad_data") if output_dir else (output_csv.parent / "bad_data")
         bad_data_dir.mkdir(parents=True, exist_ok=True)
         
         for adapter_type in ["csv", "json", "xml"]:
             for failure_rate in failure_rates:
-                # Generate bad data file if it doesn't exist
+                # Generate bad data file if it doesn't exist (reuse existing files)
                 if adapter_type == "xml":
                     bad_file = bad_data_dir / f"bad_xml_{int(failure_rate)}pct.xml"
                     if not bad_file.exists():
@@ -1122,7 +1151,8 @@ def main():
         use_storage=not args.no_storage,
         include_bad_data=args.include_bad_data,
         include_xml_performance=args.include_xml_performance,
-        failure_rates=args.failure_rates
+        failure_rates=args.failure_rates,
+        output_dir=args.output_dir
     )
     
     # Print summary
