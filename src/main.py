@@ -19,8 +19,9 @@ import sys
 import argparse
 import logging
 import uuid
+import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, Any, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed, Future
 import threading
 
@@ -40,6 +41,242 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+
+# Task timing context for modular performance tracking
+class TaskTimingContext:
+    """Context manager for tracking time spent in different ingestion tasks.
+    
+    This allows benchmarking and performance analysis by module.
+    """
+    def __init__(self):
+        self.timings: Dict[str, float] = {
+            'ingestion_time': 0.0,
+            'processing_time': 0.0,
+            'persistence_time': 0.0,
+            'raw_vault_time': 0.0,
+            'cdc_time': 0.0
+        }
+        self.start_times: Dict[str, float] = {}
+    
+    def start_task(self, task_name: str) -> None:
+        """Start timing a task."""
+        self.start_times[task_name] = time.time()
+    
+    def end_task(self, task_name: str) -> None:
+        """End timing a task and accumulate the duration."""
+        if task_name in self.start_times:
+            duration = time.time() - self.start_times[task_name]
+            if task_name in self.timings:
+                self.timings[task_name] += duration
+            del self.start_times[task_name]
+    
+    def get_timings(self) -> Dict[str, float]:
+        """Get accumulated timings for all tasks."""
+        return self.timings.copy()
+    
+    def reset(self) -> None:
+        """Reset all timings."""
+        for key in self.timings:
+            self.timings[key] = 0.0
+        self.start_times.clear()
+
+
+def ingestion_task(
+    adapter,
+    source: str,
+    timing_context: Optional[TaskTimingContext] = None
+):
+    """Task 1: Ingestion - Read data from source and yield batches.
+    
+    This task handles reading the file and preparing batches for processing.
+    It's the first step in the pipeline and is I/O bound.
+    
+    Args:
+        adapter: Ingestion adapter instance
+        source: Source file path
+        timing_context: Optional timing context for performance tracking
+    
+    Yields:
+        Result objects containing batches of data
+    """
+    if timing_context:
+        timing_context.start_task('ingestion_time')
+    
+    try:
+        for result in adapter.ingest(source):
+            yield result
+    finally:
+        if timing_context:
+            timing_context.end_task('ingestion_time')
+
+
+def processing_task(
+    result: Result,
+    adapter_name: str,
+    timing_context: Optional[TaskTimingContext] = None
+) -> Tuple[Result, Any]:
+    """Task 2: Processing - Validate and redact data.
+    
+    This task handles validation and PII redaction. The actual processing
+    happens in the adapter, so this is mainly a pass-through with timing.
+    
+    Args:
+        result: Result from ingestion task
+        adapter_name: Name of the adapter (for context)
+        timing_context: Optional timing context for performance tracking
+    
+    Returns:
+        Tuple of (result, processed_data)
+    """
+    if timing_context:
+        timing_context.start_task('processing_time')
+    
+    try:
+        # Processing (validation/redaction) happens in adapter.ingest()
+        # This is mainly for timing separation
+        return result, result.value
+    finally:
+        if timing_context:
+            timing_context.end_task('processing_time')
+
+
+def persistence_task(
+    storage: StoragePort,
+    df: Any,
+    table_name: str,
+    ingestion_id: str,
+    source_adapter: str,
+    enable_cdc: bool = True,
+    timing_context: Optional[TaskTimingContext] = None
+) -> Result[int]:
+    """Task 3: Persistence - Store redacted data to main tables.
+    
+    This task persists the validated and redacted data to the main database tables.
+    It does NOT include raw vault or CDC operations.
+    
+    Args:
+        storage: Storage adapter instance
+        df: DataFrame or GoldenRecord to persist
+        table_name: Target table name
+        ingestion_id: Ingestion run ID
+        source_adapter: Source adapter identifier
+        enable_cdc: Whether CDC is enabled (affects which method is used)
+        timing_context: Optional timing context for performance tracking
+    
+    Returns:
+        Result with number of rows persisted
+    """
+    if timing_context:
+        timing_context.start_task('persistence_time')
+    
+    try:
+        # Use standard persist_dataframe (no CDC, no raw vault)
+        if hasattr(df, 'shape'):  # DataFrame
+            if hasattr(storage, 'persist_dataframe'):
+                return storage.persist_dataframe(df, table_name)
+            else:
+                return Result.failure_result(ValueError("Storage adapter does not support DataFrame persistence"))
+        else:  # GoldenRecord
+            return storage.persist(df)
+    finally:
+        if timing_context:
+            timing_context.end_task('persistence_time')
+
+
+def raw_vault_task(
+    storage: StoragePort,
+    raw_df: Any,
+    table_name: str,
+    ingestion_id: str,
+    source_adapter: str,
+    timing_context: Optional[TaskTimingContext] = None
+) -> Result[int]:
+    """Task 4: Raw Vault - Store original unredacted data (encrypted).
+    
+    This task persists the original unredacted data to the raw vault.
+    The data is encrypted before storage.
+    
+    Args:
+        storage: Storage adapter instance
+        raw_df: Original unredacted DataFrame
+        table_name: Target table name
+        ingestion_id: Ingestion run ID
+        source_adapter: Source adapter identifier
+        timing_context: Optional timing context for performance tracking
+    
+    Returns:
+        Result with number of rows persisted to raw vault
+    """
+    if timing_context:
+        timing_context.start_task('raw_vault_time')
+    
+    try:
+        if hasattr(storage, '_persist_raw_data_vault'):
+            return storage._persist_raw_data_vault(
+                raw_df,
+                table_name,
+                ingestion_id=ingestion_id,
+                source_adapter=source_adapter
+            )
+        else:
+            # Storage adapter doesn't support raw vault
+            return Result.success_result(0)
+    finally:
+        if timing_context:
+            timing_context.end_task('raw_vault_time')
+
+
+def cdc_task(
+    storage: StoragePort,
+    df: Any,
+    raw_df: Any,
+    table_name: str,
+    ingestion_id: str,
+    source_adapter: str,
+    timing_context: Optional[TaskTimingContext] = None
+) -> Result[int]:
+    """Task 5: Change Data Capture - Detect changes and log them.
+    
+    This task performs change detection, updates only changed fields,
+    and logs changes to the audit log. It uses persist_dataframe_smart
+    which handles CDC internally.
+    
+    Args:
+        storage: Storage adapter instance
+        df: Redacted DataFrame to persist
+        raw_df: Original unredacted DataFrame (for change detection)
+        table_name: Target table name
+        ingestion_id: Ingestion run ID
+        source_adapter: Source adapter identifier
+        timing_context: Optional timing context for performance tracking
+    
+    Returns:
+        Result with number of rows processed
+    """
+    if timing_context:
+        timing_context.start_task('cdc_time')
+    
+    try:
+        if hasattr(storage, 'persist_dataframe_smart'):
+            # persist_dataframe_smart handles CDC internally
+            return storage.persist_dataframe_smart(
+                df=df,
+                table_name=table_name,
+                raw_df=raw_df,
+                enable_cdc=True,  # Explicitly enable CDC
+                ingestion_id=ingestion_id,
+                source_adapter=source_adapter
+            )
+        else:
+            # Fallback to standard persistence (no CDC)
+            if hasattr(storage, 'persist_dataframe'):
+                return storage.persist_dataframe(df, table_name)
+            else:
+                return Result.failure_result(ValueError("Storage adapter does not support DataFrame persistence"))
+    finally:
+        if timing_context:
+            timing_context.end_task('cdc_time')
 
 
 def create_storage_adapter() -> StoragePort:

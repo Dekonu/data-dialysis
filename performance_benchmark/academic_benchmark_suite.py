@@ -51,6 +51,14 @@ from src.domain.guardrails import CircuitBreaker, CircuitBreakerConfig
 from src.infrastructure.config_manager import get_database_config
 from src.infrastructure.redaction_logger import get_redaction_logger
 from src.infrastructure.redaction_context import redaction_context
+from src.main import (
+    ingestion_task,
+    processing_task,
+    persistence_task,
+    raw_vault_task,
+    cdc_task,
+    TaskTimingContext
+)
 import uuid
 
 # Configure logging
@@ -73,7 +81,12 @@ class BenchmarkMetrics:
     # Timing metrics (required)
     total_time_seconds: float
     processing_time_seconds: float
-    upload_time_seconds: float  # Time to read/prepare batches from file
+    upload_time_seconds: float  # Time to read/prepare batches from file (ingestion task)
+    ingestion_time_seconds: float  # Time for ingestion task (reading from file)
+    processing_task_time_seconds: float  # Time for processing task (validation/redaction)
+    persistence_time_seconds: float  # Time for persistence task (storing redacted data)
+    raw_vault_time_seconds: float  # Time for raw vault task (storing original data)
+    cdc_time_seconds: float  # Time for CDC task (change detection and logging)
     records_per_second: float
     mb_per_second: float
     
@@ -888,6 +901,9 @@ def benchmark_ingestion(
     batch_processing_times = []  # Time to process each batch (validation, redaction, persistence)
     batch_times = []  # Total time per batch (upload + processing)
     
+    # Task timing context for modular performance tracking
+    task_timing = TaskTimingContext()
+    
     # Get adapter (with config_path for XML files)
     adapter_kwargs = {}
     if adapter_type == "xml":
@@ -924,126 +940,152 @@ def benchmark_ingestion(
             source_adapter=adapter.adapter_name,
             ingestion_id=ingestion_id
         ):
-            # Use explicit iterator to track upload vs processing time
-            ingest_iterator = iter(adapter.ingest(str(file_path)))
-            
-            while True:
-                try:
-                    # Track upload time: time to read/prepare batch from file
-                    batch_upload_start = time.time()
-                    result = next(ingest_iterator)
-                    batch_upload_end = time.time()
-                    batch_upload_time = batch_upload_end - batch_upload_start
-                    batch_upload_times.append(batch_upload_time)
-                    
-                    # Sample memory periodically (every 10 batches to avoid overhead)
-                    if num_batches % 10 == 0:
-                        current_memory = process.memory_info().rss / (1024 * 1024)  # MB
-                        memory_samples.append(current_memory)
-                    
-                    # Track processing time: time to handle the batch result
-                    batch_processing_start = time.time()
-                    
-                    if isinstance(result.value, tuple):
-                        # Handle tuple returns (redacted_df, raw_df) for raw vault
-                        if adapter_type in ["csv", "json"]:
-                            df, _ = result.value
-                            if hasattr(df, '__len__'):
-                                batch_records = len(df)
-                                records_processed += batch_records
-                                if result.is_success():
-                                    records_successful += batch_records
-                                else:
-                                    records_failed += batch_records
-                        elif adapter_type == "xml":
-                            # XML returns (GoldenRecord, original_record_data)
-                            records_processed += 1
-                            if result.is_success():
-                                records_successful += 1
+            # Use modular ingestion task
+            for result in ingestion_task(adapter, str(file_path), timing_context=task_timing):
+                # Track batch upload time (for backward compatibility)
+                batch_upload_start = time.time()
+                
+                # Sample memory periodically (every 10 batches to avoid overhead)
+                if num_batches % 10 == 0:
+                    current_memory = process.memory_info().rss / (1024 * 1024)  # MB
+                    memory_samples.append(current_memory)
+                
+                # Track processing time: time to handle the batch result
+                batch_processing_start = time.time()
+                
+                # Use modular processing task
+                processed_result, processed_data = processing_task(
+                    result,
+                    adapter.adapter_name,
+                    timing_context=task_timing
+                )
+                
+                if isinstance(processed_data, tuple):
+                    # Handle tuple returns (redacted_df, raw_df) for raw vault
+                    if adapter_type in ["csv", "json"]:
+                        df, raw_df = processed_data
+                        if hasattr(df, '__len__'):
+                            batch_records = len(df)
+                            records_processed += batch_records
+                            if processed_result.is_success():
+                                records_successful += batch_records
                             else:
-                                records_failed += 1
-                    elif hasattr(result.value, '__len__'):
-                        # DataFrame result
-                        batch_records = len(result.value)
-                        records_processed += batch_records
-                        if result.is_success():
-                            records_successful += batch_records
-                        else:
-                            records_failed += batch_records
-                    else:
-                        # Single record (GoldenRecord)
+                                records_failed += batch_records
+                    elif adapter_type == "xml":
+                        # XML returns (GoldenRecord, original_record_data)
                         records_processed += 1
-                        if result.is_success():
+                        if processed_result.is_success():
                             records_successful += 1
                         else:
                             records_failed += 1
-                    
-                    # If storage is provided, persist the batch (this is part of processing time)
-                    if storage and result.is_success():
-                        if adapter_type == "xml":
-                            # XML returns GoldenRecord directly
-                            if not isinstance(result.value, tuple):
-                                persist_result = storage.persist(result.value)
+                elif hasattr(processed_data, '__len__'):
+                    # DataFrame result
+                    batch_records = len(processed_data)
+                    records_processed += batch_records
+                    if processed_result.is_success():
+                        records_successful += batch_records
+                    else:
+                        records_failed += batch_records
+                else:
+                    # Single record (GoldenRecord)
+                    records_processed += 1
+                    if processed_result.is_success():
+                        records_successful += 1
+                    else:
+                        records_failed += 1
+                
+                # If storage is provided, use modular persistence tasks
+                if storage and processed_result.is_success():
+                    if adapter_type == "xml":
+                        # XML returns GoldenRecord directly
+                        if not isinstance(processed_data, tuple):
+                            # Use standard persistence (no CDC for single records in benchmark)
+                            persist_result = persistence_task(
+                                storage,
+                                processed_data,
+                                'patients',  # XML records go to patients table
+                                ingestion_id,
+                                adapter.adapter_name,
+                                enable_cdc=False,  # Disable CDC for single record persistence
+                                timing_context=task_timing
+                            )
+                        else:
+                            golden_record, _ = processed_data
+                            persist_result = persistence_task(
+                                storage,
+                                golden_record,
+                                'patients',
+                                ingestion_id,
+                                adapter.adapter_name,
+                                enable_cdc=False,
+                                timing_context=task_timing
+                            )
+                    elif adapter_type in ["csv", "json"]:
+                        # CSV/JSON return DataFrames - use modular tasks with CDC
+                        if isinstance(processed_data, tuple):
+                            # Tuple format: (redacted_df, raw_df)
+                            df, raw_df = processed_data
+                        elif hasattr(processed_data, 'shape'):
+                            # DataFrame format
+                            df = processed_data
+                            raw_df = None
+                        else:
+                            df = None
+                            raw_df = None
+                        
+                        if df is not None and not df.empty:
+                            # Determine table name based on columns
+                            if 'observation_id' in df.columns:
+                                table_name = 'observations'
+                            elif 'encounter_id' in df.columns:
+                                table_name = 'encounters'
+                            elif 'patient_id' in df.columns:
+                                table_name = 'patients'
                             else:
-                                golden_record, _ = result.value
-                                persist_result = storage.persist(golden_record)
-                        elif adapter_type in ["csv", "json"]:
-                            # CSV/JSON return DataFrames - use persist_dataframe
-                            if isinstance(result.value, tuple):
-                                # Tuple format: (redacted_df, raw_df)
-                                df, raw_df = result.value
-                            elif hasattr(result.value, 'shape'):
-                                # DataFrame format
-                                df = result.value
-                                raw_df = None
-                            else:
-                                df = None
-                                raw_df = None
+                                logger.warning(f"Unknown DataFrame structure, skipping persistence")
+                                table_name = None
                             
-                            if df is not None and not df.empty:
-                                # Determine table name based on columns
-                                if 'observation_id' in df.columns:
-                                    table_name = 'observations'
-                                elif 'encounter_id' in df.columns:
-                                    table_name = 'encounters'
-                                elif 'patient_id' in df.columns:
-                                    table_name = 'patients'
+                            if table_name:
+                                # Use CDC task if raw_df is available (includes persistence + raw vault + CDC)
+                                if hasattr(storage, 'persist_dataframe_smart') and raw_df is not None:
+                                    persist_result = cdc_task(
+                                        storage,
+                                        df,
+                                        raw_df,
+                                        table_name,
+                                        ingestion_id,
+                                        adapter.adapter_name,
+                                        timing_context=task_timing
+                                    )
+                                elif hasattr(storage, 'persist_dataframe'):
+                                    # Fallback to persistence only (no raw vault, no CDC)
+                                    persist_result = persistence_task(
+                                        storage,
+                                        df,
+                                        table_name,
+                                        ingestion_id,
+                                        adapter.adapter_name,
+                                        enable_cdc=False,
+                                        timing_context=task_timing
+                                    )
                                 else:
-                                    logger.warning(f"Unknown DataFrame structure, skipping persistence")
-                                    table_name = None
+                                    logger.warning(f"Storage adapter does not support DataFrame persistence")
+                                    persist_result = None
                                 
-                                if table_name:
-                                    # Use persist_dataframe_smart if available (supports raw vault)
-                                    if hasattr(storage, 'persist_dataframe_smart') and raw_df is not None:
-                                        persist_result = storage.persist_dataframe_smart(
-                                            df=df,
-                                            table_name=table_name,
-                                            raw_df=raw_df,
-                                            ingestion_id=ingestion_id,
-                                            source_adapter=adapter.adapter_name
-                                        )
-                                    elif hasattr(storage, 'persist_dataframe'):
-                                        # Fallback to persist_dataframe
-                                        persist_result = storage.persist_dataframe(df, table_name)
-                                    else:
-                                        logger.warning(f"Storage adapter does not support DataFrame persistence")
-                                        persist_result = None
-                                    
-                                    if persist_result and not persist_result.is_success():
-                                        logger.warning(f"Failed to persist {table_name} batch: {persist_result.error}")
-                    
-                    batch_processing_end = time.time()
-                    batch_processing_time = batch_processing_end - batch_processing_start
-                    batch_processing_times.append(batch_processing_time)
-                    
-                    # Total batch time (upload + processing)
-                    batch_total_time = batch_upload_time + batch_processing_time
-                    batch_times.append(batch_total_time)
-                    
-                    num_batches += 1
-                    
-                except StopIteration:
-                    break
+                                if persist_result and not persist_result.is_success():
+                                    logger.warning(f"Failed to persist {table_name} batch: {persist_result.error}")
+                
+                batch_processing_end = time.time()
+                batch_upload_time = batch_processing_start - batch_upload_start
+                batch_upload_times.append(batch_upload_time)
+                batch_processing_time = batch_processing_end - batch_processing_start
+                batch_processing_times.append(batch_processing_time)
+                
+                # Total batch time (upload + processing)
+                batch_total_time = batch_upload_time + batch_processing_time
+                batch_times.append(batch_total_time)
+                
+                num_batches += 1
             
             # Flush redaction logs if storage is available (after all records processed)
             if storage and hasattr(storage, 'flush_redaction_logs'):
@@ -1134,6 +1176,11 @@ def benchmark_ingestion(
         total_time_seconds=total_time,
         processing_time_seconds=processing_time,
         upload_time_seconds=upload_time,
+        ingestion_time_seconds=ingestion_time,
+        processing_task_time_seconds=processing_task_time,
+        persistence_time_seconds=persistence_time,
+        raw_vault_time_seconds=raw_vault_time,
+        cdc_time_seconds=cdc_time,
         records_per_second=records_per_second,
         mb_per_second=mb_per_second,
         peak_memory_mb=peak_memory_mb,
