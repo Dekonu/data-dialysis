@@ -46,7 +46,7 @@ from generate_bad_data import generate_bad_xml_file, generate_bad_json_file, gen
 # Import ingestion adapters
 from src.adapters.ingesters import get_adapter
 from src.adapters.storage import DuckDBAdapter, PostgreSQLAdapter
-from src.domain.ports import Result
+from src.domain.ports import Result, StoragePort
 from src.domain.guardrails import CircuitBreaker, CircuitBreakerConfig
 from src.infrastructure.config_manager import get_database_config
 from src.infrastructure.redaction_logger import get_redaction_logger
@@ -73,6 +73,7 @@ class BenchmarkMetrics:
     # Timing metrics (required)
     total_time_seconds: float
     processing_time_seconds: float
+    upload_time_seconds: float  # Time to read/prepare batches from file
     records_per_second: float
     mb_per_second: float
     
@@ -84,6 +85,21 @@ class BenchmarkMetrics:
     # Batch metrics (required)
     num_batches: int
     avg_batch_time_seconds: float
+    avg_batch_upload_time_seconds: float  # Average time to read/prepare each batch
+    avg_batch_processing_time_seconds: float  # Average time to process each batch
+    
+    # Batch time statistics (required)
+    min_batch_upload_time_seconds: float
+    max_batch_upload_time_seconds: float
+    median_batch_upload_time_seconds: float
+    p95_batch_upload_time_seconds: float
+    p99_batch_upload_time_seconds: float
+    
+    min_batch_processing_time_seconds: float
+    max_batch_processing_time_seconds: float
+    median_batch_processing_time_seconds: float
+    p95_batch_processing_time_seconds: float
+    p99_batch_processing_time_seconds: float
     
     # Success metrics (required)
     records_successful: int
@@ -108,6 +124,36 @@ class BenchmarkMetrics:
     # XML-specific metrics
     xml_streaming_enabled: Optional[bool] = None
     xml_memory_efficiency: Optional[float] = None
+
+
+def calculate_percentiles(values: List[float], percentiles: List[float] = [50, 95, 99]) -> Dict[float, float]:
+    """Calculate percentiles for a list of values.
+    
+    Args:
+        values: List of numeric values
+        percentiles: List of percentile values to calculate (default: [50, 95, 99])
+    
+    Returns:
+        Dictionary mapping percentile -> value
+    """
+    if not values:
+        return {p: 0.0 for p in percentiles}
+    
+    sorted_values = sorted(values)
+    result = {}
+    for p in percentiles:
+        if p == 50:
+            # Use median for 50th percentile
+            result[p] = median(sorted_values)
+        else:
+            # Calculate percentile index
+            index = (p / 100.0) * (len(sorted_values) - 1)
+            lower = int(index)
+            upper = min(lower + 1, len(sorted_values) - 1)
+            weight = index - lower
+            result[p] = sorted_values[lower] * (1 - weight) + sorted_values[upper] * weight
+    
+    return result
 
 
 def estimate_records_for_size(target_size_mb: float, format_type: str) -> int:
@@ -261,7 +307,7 @@ def benchmark_bad_data(
     adapter_type: str,
     failure_rate_percent: float,
     batch_size: Optional[int] = None,
-    storage: Optional[Result] = None
+    storage: Optional[StoragePort] = None
 ) -> BenchmarkMetrics:
     """Run benchmark for bad data with circuit breaker tracking.
     
@@ -288,6 +334,8 @@ def benchmark_bad_data(
     
     # Memory samples over time
     memory_samples = []
+    batch_upload_times = []
+    batch_processing_times = []
     batch_times = []
     
     # Get adapter (with config_path for XML files)
@@ -322,7 +370,6 @@ def benchmark_bad_data(
     records_successful = 0
     records_failed = 0
     num_batches = 0
-    batch_start = None
     
     # Start timing
     start_time = time.time()
@@ -334,60 +381,125 @@ def benchmark_bad_data(
             source_adapter=adapter.adapter_name,
             ingestion_id=ingestion_id
         ):
-            # Process records with circuit breaker tracking
-            for result in adapter.ingest(str(file_path)):
-                # Record result in circuit breaker
+            # Use explicit iterator to track upload vs processing time
+            ingest_iterator = iter(adapter.ingest(str(file_path)))
+            
+            while True:
                 try:
-                    circuit_breaker.record_result(result)
-                except Exception as e:
-                    # Circuit breaker may raise if abort_on_open=True, but we set it to False
-                    logger.debug(f"Circuit breaker recorded result: {e}")
-                
-                # Sample memory periodically
-                if num_batches % 10 == 0:
-                    current_memory = process.memory_info().rss / (1024 * 1024)  # MB
-                    memory_samples.append(current_memory)
-                
-                # Track batch start time
-                if batch_start is None:
-                    batch_start = time.time()
-                
-                if isinstance(result.value, tuple):
-                    if adapter_type in ["csv", "json"]:
-                        df, _ = result.value
-                        if hasattr(df, '__len__'):
-                            batch_records = len(df)
-                            records_processed += batch_records
+                    # Track upload time: time to read/prepare batch from file
+                    batch_upload_start = time.time()
+                    result = next(ingest_iterator)
+                    batch_upload_end = time.time()
+                    batch_upload_time = batch_upload_end - batch_upload_start
+                    batch_upload_times.append(batch_upload_time)
+                    
+                    # Record result in circuit breaker
+                    try:
+                        circuit_breaker.record_result(result)
+                    except Exception as e:
+                        logger.debug(f"Circuit breaker recorded result: {e}")
+                    
+                    # Sample memory periodically
+                    if num_batches % 10 == 0:
+                        current_memory = process.memory_info().rss / (1024 * 1024)  # MB
+                        memory_samples.append(current_memory)
+                    
+                    # Track processing time: time to handle the batch result
+                    batch_processing_start = time.time()
+                    
+                    if isinstance(result.value, tuple):
+                        if adapter_type in ["csv", "json"]:
+                            df, _ = result.value
+                            if hasattr(df, '__len__'):
+                                batch_records = len(df)
+                                records_processed += batch_records
+                                if result.is_success():
+                                    records_successful += batch_records
+                                else:
+                                    records_failed += batch_records
+                        elif adapter_type == "xml":
+                            records_processed += 1
                             if result.is_success():
-                                records_successful += batch_records
+                                records_successful += 1
                             else:
-                                records_failed += batch_records
-                    elif adapter_type == "xml":
+                                records_failed += 1
+                    elif hasattr(result.value, '__len__'):
+                        batch_records = len(result.value)
+                        records_processed += batch_records
+                        if result.is_success():
+                            records_successful += batch_records
+                        else:
+                            records_failed += batch_records
+                    else:
                         records_processed += 1
                         if result.is_success():
                             records_successful += 1
                         else:
                             records_failed += 1
-                elif hasattr(result.value, '__len__'):
-                    batch_records = len(result.value)
-                    records_processed += batch_records
-                    if result.is_success():
-                        records_successful += batch_records
-                    else:
-                        records_failed += batch_records
-                else:
-                    records_processed += 1
-                    if result.is_success():
-                        records_successful += 1
-                    else:
-                        records_failed += 1
-                
-                num_batches += 1
-                
-                # Track batch processing time
-                batch_end = time.time()
-                batch_times.append(batch_end - batch_start)
-                batch_start = batch_end
+                    
+                    # If storage is provided, persist the batch (this is part of processing time)
+                    if storage and result.is_success():
+                        if adapter_type == "xml":
+                            # XML returns GoldenRecord directly
+                            if not isinstance(result.value, tuple):
+                                persist_result = storage.persist(result.value)
+                            else:
+                                golden_record, _ = result.value
+                                persist_result = storage.persist(golden_record)
+                        elif adapter_type in ["csv", "json"]:
+                            # CSV/JSON return DataFrames - use persist_dataframe
+                            if isinstance(result.value, tuple):
+                                df, raw_df = result.value
+                            elif hasattr(result.value, 'shape'):
+                                df = result.value
+                                raw_df = None
+                            else:
+                                df = None
+                                raw_df = None
+                            
+                            if df is not None and not df.empty:
+                                # Determine table name based on columns
+                                if 'observation_id' in df.columns:
+                                    table_name = 'observations'
+                                elif 'encounter_id' in df.columns:
+                                    table_name = 'encounters'
+                                elif 'patient_id' in df.columns:
+                                    table_name = 'patients'
+                                else:
+                                    logger.warning(f"Unknown DataFrame structure, skipping persistence")
+                                    table_name = None
+                                
+                                if table_name:
+                                    # Use persist_dataframe_smart if available (supports raw vault)
+                                    if hasattr(storage, 'persist_dataframe_smart') and raw_df is not None:
+                                        persist_result = storage.persist_dataframe_smart(
+                                            df=df,
+                                            table_name=table_name,
+                                            raw_df=raw_df,
+                                            ingestion_id=ingestion_id,
+                                            source_adapter=adapter.adapter_name
+                                        )
+                                    elif hasattr(storage, 'persist_dataframe'):
+                                        persist_result = storage.persist_dataframe(df, table_name)
+                                    else:
+                                        logger.warning(f"Storage adapter does not support DataFrame persistence")
+                                        persist_result = None
+                                    
+                                    if persist_result and not persist_result.is_success():
+                                        logger.warning(f"Failed to persist {table_name} batch: {persist_result.error}")
+                    
+                    batch_processing_end = time.time()
+                    batch_processing_time = batch_processing_end - batch_processing_start
+                    batch_processing_times.append(batch_processing_time)
+                    
+                    # Total batch time (upload + processing)
+                    batch_total_time = batch_upload_time + batch_processing_time
+                    batch_times.append(batch_total_time)
+                    
+                    num_batches += 1
+                    
+                except StopIteration:
+                    break
             
             # Flush redaction logs if storage is available
             if storage and hasattr(storage, 'flush_redaction_logs'):
@@ -418,6 +530,8 @@ def benchmark_bad_data(
     # End timing
     end_time = time.time()
     total_time = end_time - start_time
+    upload_time = sum(batch_upload_times) if batch_upload_times else 0
+    processing_time = sum(batch_processing_times) if batch_processing_times else 0
     cpu_end = process.cpu_percent()
     
     # Get memory statistics
@@ -431,12 +545,32 @@ def benchmark_bad_data(
     # Get circuit breaker statistics
     cb_stats = circuit_breaker.get_statistics()
     
+    # Calculate batch time statistics
+    avg_batch_time = mean(batch_times) if batch_times else 0
+    avg_batch_upload_time = mean(batch_upload_times) if batch_upload_times else 0
+    avg_batch_processing_time = mean(batch_processing_times) if batch_processing_times else 0
+    
+    # Calculate percentiles for batch upload times
+    upload_percentiles = calculate_percentiles(batch_upload_times, [50, 95, 99])
+    min_batch_upload_time = min(batch_upload_times) if batch_upload_times else 0.0
+    max_batch_upload_time = max(batch_upload_times) if batch_upload_times else 0.0
+    median_batch_upload_time = upload_percentiles.get(50, 0.0)
+    p95_batch_upload_time = upload_percentiles.get(95, 0.0)
+    p99_batch_upload_time = upload_percentiles.get(99, 0.0)
+    
+    # Calculate percentiles for batch processing times
+    processing_percentiles = calculate_percentiles(batch_processing_times, [50, 95, 99])
+    min_batch_processing_time = min(batch_processing_times) if batch_processing_times else 0.0
+    max_batch_processing_time = max(batch_processing_times) if batch_processing_times else 0.0
+    median_batch_processing_time = processing_percentiles.get(50, 0.0)
+    p95_batch_processing_time = processing_percentiles.get(95, 0.0)
+    p99_batch_processing_time = processing_percentiles.get(99, 0.0)
+    
     # Calculate metrics
     records_per_second = records_processed / total_time if total_time > 0 else 0
     mb_per_second = file_size_mb / total_time if total_time > 0 else 0
     memory_efficiency = avg_memory_mb / records_processed if records_processed > 0 else 0
     success_rate = records_successful / records_processed if records_processed > 0 else 0
-    avg_batch_time = mean(batch_times) if batch_times else 0
     
     # Estimate number of records from file (if not already counted)
     if records_processed == 0:
@@ -454,7 +588,8 @@ def benchmark_bad_data(
         num_records=records_processed,
         test_scenario=f"bad_data_{int(failure_rate_percent)}pct",
         total_time_seconds=total_time,
-        processing_time_seconds=total_time,
+        processing_time_seconds=processing_time,
+        upload_time_seconds=upload_time,
         records_per_second=records_per_second,
         mb_per_second=mb_per_second,
         peak_memory_mb=peak_memory_mb,
@@ -463,6 +598,18 @@ def benchmark_bad_data(
         num_batches=num_batches,
         batch_size=batch_size,
         avg_batch_time_seconds=avg_batch_time,
+        avg_batch_upload_time_seconds=avg_batch_upload_time,
+        avg_batch_processing_time_seconds=avg_batch_processing_time,
+        min_batch_upload_time_seconds=min_batch_upload_time,
+        max_batch_upload_time_seconds=max_batch_upload_time,
+        median_batch_upload_time_seconds=median_batch_upload_time,
+        p95_batch_upload_time_seconds=p95_batch_upload_time,
+        p99_batch_upload_time_seconds=p99_batch_upload_time,
+        min_batch_processing_time_seconds=min_batch_processing_time,
+        max_batch_processing_time_seconds=max_batch_processing_time,
+        median_batch_processing_time_seconds=median_batch_processing_time,
+        p95_batch_processing_time_seconds=p95_batch_processing_time,
+        p99_batch_processing_time_seconds=p99_batch_processing_time,
         records_successful=records_successful,
         records_failed=records_failed,
         success_rate=success_rate,
@@ -480,7 +627,7 @@ def benchmark_xml_performance(
     file_path: Path,
     streaming_enabled: bool,
     batch_size: Optional[int] = None,
-    storage: Optional[Result] = None
+    storage: Optional[StoragePort] = None
 ) -> BenchmarkMetrics:
     """Run XML-specific performance benchmark (streaming vs non-streaming).
     
@@ -506,6 +653,8 @@ def benchmark_xml_performance(
     
     # Memory samples over time
     memory_samples = []
+    batch_upload_times = []
+    batch_processing_times = []
     batch_times = []
     
     # Get XML adapter with streaming configuration
@@ -528,7 +677,6 @@ def benchmark_xml_performance(
     records_successful = 0
     records_failed = 0
     num_batches = 0
-    batch_start = None
     
     # Start timing
     start_time = time.time()
@@ -540,37 +688,60 @@ def benchmark_xml_performance(
             source_adapter=adapter.adapter_name,
             ingestion_id=ingestion_id
         ):
-            # Process records
-            for result in adapter.ingest(str(file_path)):
-                # Sample memory periodically
-                if num_batches % 10 == 0:
-                    current_memory = process.memory_info().rss / (1024 * 1024)  # MB
-                    memory_samples.append(current_memory)
-                
-                # Track batch start time
-                if batch_start is None:
-                    batch_start = time.time()
-                
-                if isinstance(result.value, tuple):
-                    golden_record, _ = result.value
-                    records_processed += 1
-                    if result.is_success():
-                        records_successful += 1
+            # Use explicit iterator to track upload vs processing time
+            ingest_iterator = iter(adapter.ingest(str(file_path)))
+            
+            while True:
+                try:
+                    # Track upload time: time to read/prepare batch from file
+                    batch_upload_start = time.time()
+                    result = next(ingest_iterator)
+                    batch_upload_end = time.time()
+                    batch_upload_time = batch_upload_end - batch_upload_start
+                    batch_upload_times.append(batch_upload_time)
+                    
+                    # Sample memory periodically
+                    if num_batches % 10 == 0:
+                        current_memory = process.memory_info().rss / (1024 * 1024)  # MB
+                        memory_samples.append(current_memory)
+                    
+                    # Track processing time: time to handle the batch result
+                    batch_processing_start = time.time()
+                    
+                    if isinstance(result.value, tuple):
+                        golden_record, _ = result.value
+                        records_processed += 1
+                        if result.is_success():
+                            records_successful += 1
+                        else:
+                            records_failed += 1
                     else:
-                        records_failed += 1
-                else:
-                    records_processed += 1
-                    if result.is_success():
-                        records_successful += 1
-                    else:
-                        records_failed += 1
-                
-                num_batches += 1
-                
-                # Track batch processing time
-                batch_end = time.time()
-                batch_times.append(batch_end - batch_start)
-                batch_start = batch_end
+                        records_processed += 1
+                        if result.is_success():
+                            records_successful += 1
+                        else:
+                            records_failed += 1
+                    
+                    # If storage is provided, persist the batch (this is part of processing time)
+                    if storage and result.is_success():
+                        if not isinstance(result.value, tuple):
+                            persist_result = storage.persist(result.value)
+                        else:
+                            golden_record, _ = result.value
+                            persist_result = storage.persist(golden_record)
+                    
+                    batch_processing_end = time.time()
+                    batch_processing_time = batch_processing_end - batch_processing_start
+                    batch_processing_times.append(batch_processing_time)
+                    
+                    # Total batch time (upload + processing)
+                    batch_total_time = batch_upload_time + batch_processing_time
+                    batch_times.append(batch_total_time)
+                    
+                    num_batches += 1
+                    
+                except StopIteration:
+                    break
             
             # Flush redaction logs if storage is available
             if storage and hasattr(storage, 'flush_redaction_logs'):
@@ -601,6 +772,8 @@ def benchmark_xml_performance(
     # End timing
     end_time = time.time()
     total_time = end_time - start_time
+    upload_time = sum(batch_upload_times) if batch_upload_times else 0
+    processing_time = sum(batch_processing_times) if batch_processing_times else 0
     cpu_end = process.cpu_percent()
     
     # Get memory statistics
@@ -611,12 +784,32 @@ def benchmark_xml_performance(
     peak_memory_mb = max(peak_memory_mb, max(memory_samples) if memory_samples else 0)
     avg_memory_mb = mean(memory_samples) if memory_samples else initial_memory
     
+    # Calculate batch time statistics
+    avg_batch_time = mean(batch_times) if batch_times else 0
+    avg_batch_upload_time = mean(batch_upload_times) if batch_upload_times else 0
+    avg_batch_processing_time = mean(batch_processing_times) if batch_processing_times else 0
+    
+    # Calculate percentiles for batch upload times
+    upload_percentiles = calculate_percentiles(batch_upload_times, [50, 95, 99])
+    min_batch_upload_time = min(batch_upload_times) if batch_upload_times else 0.0
+    max_batch_upload_time = max(batch_upload_times) if batch_upload_times else 0.0
+    median_batch_upload_time = upload_percentiles.get(50, 0.0)
+    p95_batch_upload_time = upload_percentiles.get(95, 0.0)
+    p99_batch_upload_time = upload_percentiles.get(99, 0.0)
+    
+    # Calculate percentiles for batch processing times
+    processing_percentiles = calculate_percentiles(batch_processing_times, [50, 95, 99])
+    min_batch_processing_time = min(batch_processing_times) if batch_processing_times else 0.0
+    max_batch_processing_time = max(batch_processing_times) if batch_processing_times else 0.0
+    median_batch_processing_time = processing_percentiles.get(50, 0.0)
+    p95_batch_processing_time = processing_percentiles.get(95, 0.0)
+    p99_batch_processing_time = processing_percentiles.get(99, 0.0)
+    
     # Calculate metrics
     records_per_second = records_processed / total_time if total_time > 0 else 0
     mb_per_second = file_size_mb / total_time if total_time > 0 else 0
     memory_efficiency = avg_memory_mb / records_processed if records_processed > 0 else 0
     success_rate = records_successful / records_processed if records_processed > 0 else 0
-    avg_batch_time = mean(batch_times) if batch_times else 0
     
     # Estimate number of records from file (if not already counted)
     if records_processed == 0:
@@ -629,7 +822,8 @@ def benchmark_xml_performance(
         num_records=records_processed,
         test_scenario=f"xml_performance_streaming_{streaming_enabled}",
         total_time_seconds=total_time,
-        processing_time_seconds=total_time,
+        processing_time_seconds=processing_time,
+        upload_time_seconds=upload_time,
         records_per_second=records_per_second,
         mb_per_second=mb_per_second,
         peak_memory_mb=peak_memory_mb,
@@ -638,6 +832,18 @@ def benchmark_xml_performance(
         num_batches=num_batches,
         batch_size=batch_size,
         avg_batch_time_seconds=avg_batch_time,
+        avg_batch_upload_time_seconds=avg_batch_upload_time,
+        avg_batch_processing_time_seconds=avg_batch_processing_time,
+        min_batch_upload_time_seconds=min_batch_upload_time,
+        max_batch_upload_time_seconds=max_batch_upload_time,
+        median_batch_upload_time_seconds=median_batch_upload_time,
+        p95_batch_upload_time_seconds=p95_batch_upload_time,
+        p99_batch_upload_time_seconds=p99_batch_upload_time,
+        min_batch_processing_time_seconds=min_batch_processing_time,
+        max_batch_processing_time_seconds=max_batch_processing_time,
+        median_batch_processing_time_seconds=median_batch_processing_time,
+        p95_batch_processing_time_seconds=p95_batch_processing_time,
+        p99_batch_processing_time_seconds=p99_batch_processing_time,
         records_successful=records_successful,
         records_failed=records_failed,
         success_rate=success_rate,
@@ -652,7 +858,7 @@ def benchmark_ingestion(
     file_path: Path,
     adapter_type: str,
     batch_size: Optional[int] = None,
-    storage: Optional[Result] = None
+    storage: Optional[StoragePort] = None
 ) -> BenchmarkMetrics:
     """Run benchmark for a single file.
     
@@ -678,7 +884,9 @@ def benchmark_ingestion(
     
     # Memory samples over time
     memory_samples = []
-    batch_times = []
+    batch_upload_times = []  # Time to read/prepare each batch from file
+    batch_processing_times = []  # Time to process each batch (validation, redaction, persistence)
+    batch_times = []  # Total time per batch (upload + processing)
     
     # Get adapter (with config_path for XML files)
     adapter_kwargs = {}
@@ -703,10 +911,10 @@ def benchmark_ingestion(
     records_successful = 0
     records_failed = 0
     num_batches = 0
-    batch_start = None
     
     # Start timing
     start_time = time.time()
+    upload_start_time = start_time  # Track when file reading starts
     cpu_start = process.cpu_percent(interval=0.1)  # Get initial CPU with small interval
     
     try:
@@ -716,57 +924,126 @@ def benchmark_ingestion(
             source_adapter=adapter.adapter_name,
             ingestion_id=ingestion_id
         ):
-            # Process records
-            for result in adapter.ingest(str(file_path)):
-                # Sample memory periodically (every 10 batches to avoid overhead)
-                if num_batches % 10 == 0:
-                    current_memory = process.memory_info().rss / (1024 * 1024)  # MB
-                    memory_samples.append(current_memory)
-                
-                # Track batch start time
-                if batch_start is None:
-                    batch_start = time.time()
-                
-                if isinstance(result.value, tuple):
-                    # Handle tuple returns (redacted_df, raw_df) for raw vault
-                    if adapter_type in ["csv", "json"]:
-                        df, _ = result.value
-                        if hasattr(df, '__len__'):
-                            batch_records = len(df)
-                            records_processed += batch_records
+            # Use explicit iterator to track upload vs processing time
+            ingest_iterator = iter(adapter.ingest(str(file_path)))
+            
+            while True:
+                try:
+                    # Track upload time: time to read/prepare batch from file
+                    batch_upload_start = time.time()
+                    result = next(ingest_iterator)
+                    batch_upload_end = time.time()
+                    batch_upload_time = batch_upload_end - batch_upload_start
+                    batch_upload_times.append(batch_upload_time)
+                    
+                    # Sample memory periodically (every 10 batches to avoid overhead)
+                    if num_batches % 10 == 0:
+                        current_memory = process.memory_info().rss / (1024 * 1024)  # MB
+                        memory_samples.append(current_memory)
+                    
+                    # Track processing time: time to handle the batch result
+                    batch_processing_start = time.time()
+                    
+                    if isinstance(result.value, tuple):
+                        # Handle tuple returns (redacted_df, raw_df) for raw vault
+                        if adapter_type in ["csv", "json"]:
+                            df, _ = result.value
+                            if hasattr(df, '__len__'):
+                                batch_records = len(df)
+                                records_processed += batch_records
+                                if result.is_success():
+                                    records_successful += batch_records
+                                else:
+                                    records_failed += batch_records
+                        elif adapter_type == "xml":
+                            # XML returns (GoldenRecord, original_record_data)
+                            records_processed += 1
                             if result.is_success():
-                                records_successful += batch_records
+                                records_successful += 1
                             else:
-                                records_failed += batch_records
-                    elif adapter_type == "xml":
-                        # XML returns (GoldenRecord, original_record_data)
+                                records_failed += 1
+                    elif hasattr(result.value, '__len__'):
+                        # DataFrame result
+                        batch_records = len(result.value)
+                        records_processed += batch_records
+                        if result.is_success():
+                            records_successful += batch_records
+                        else:
+                            records_failed += batch_records
+                    else:
+                        # Single record (GoldenRecord)
                         records_processed += 1
                         if result.is_success():
                             records_successful += 1
                         else:
                             records_failed += 1
-                elif hasattr(result.value, '__len__'):
-                    # DataFrame result
-                    batch_records = len(result.value)
-                    records_processed += batch_records
-                    if result.is_success():
-                        records_successful += batch_records
-                    else:
-                        records_failed += batch_records
-                else:
-                    # Single record (GoldenRecord)
-                    records_processed += 1
-                    if result.is_success():
-                        records_successful += 1
-                    else:
-                        records_failed += 1
-                
-                num_batches += 1
-                
-                # Track batch processing time
-                batch_end = time.time()
-                batch_times.append(batch_end - batch_start)
-                batch_start = batch_end  # Next batch starts where this one ended
+                    
+                    # If storage is provided, persist the batch (this is part of processing time)
+                    if storage and result.is_success():
+                        if adapter_type == "xml":
+                            # XML returns GoldenRecord directly
+                            if not isinstance(result.value, tuple):
+                                persist_result = storage.persist(result.value)
+                            else:
+                                golden_record, _ = result.value
+                                persist_result = storage.persist(golden_record)
+                        elif adapter_type in ["csv", "json"]:
+                            # CSV/JSON return DataFrames - use persist_dataframe
+                            if isinstance(result.value, tuple):
+                                # Tuple format: (redacted_df, raw_df)
+                                df, raw_df = result.value
+                            elif hasattr(result.value, 'shape'):
+                                # DataFrame format
+                                df = result.value
+                                raw_df = None
+                            else:
+                                df = None
+                                raw_df = None
+                            
+                            if df is not None and not df.empty:
+                                # Determine table name based on columns
+                                if 'observation_id' in df.columns:
+                                    table_name = 'observations'
+                                elif 'encounter_id' in df.columns:
+                                    table_name = 'encounters'
+                                elif 'patient_id' in df.columns:
+                                    table_name = 'patients'
+                                else:
+                                    logger.warning(f"Unknown DataFrame structure, skipping persistence")
+                                    table_name = None
+                                
+                                if table_name:
+                                    # Use persist_dataframe_smart if available (supports raw vault)
+                                    if hasattr(storage, 'persist_dataframe_smart') and raw_df is not None:
+                                        persist_result = storage.persist_dataframe_smart(
+                                            df=df,
+                                            table_name=table_name,
+                                            raw_df=raw_df,
+                                            ingestion_id=ingestion_id,
+                                            source_adapter=adapter.adapter_name
+                                        )
+                                    elif hasattr(storage, 'persist_dataframe'):
+                                        # Fallback to persist_dataframe
+                                        persist_result = storage.persist_dataframe(df, table_name)
+                                    else:
+                                        logger.warning(f"Storage adapter does not support DataFrame persistence")
+                                        persist_result = None
+                                    
+                                    if persist_result and not persist_result.is_success():
+                                        logger.warning(f"Failed to persist {table_name} batch: {persist_result.error}")
+                    
+                    batch_processing_end = time.time()
+                    batch_processing_time = batch_processing_end - batch_processing_start
+                    batch_processing_times.append(batch_processing_time)
+                    
+                    # Total batch time (upload + processing)
+                    batch_total_time = batch_upload_time + batch_processing_time
+                    batch_times.append(batch_total_time)
+                    
+                    num_batches += 1
+                    
+                except StopIteration:
+                    break
             
             # Flush redaction logs if storage is available (after all records processed)
             if storage and hasattr(storage, 'flush_redaction_logs'):
@@ -799,6 +1076,8 @@ def benchmark_ingestion(
     # End timing
     end_time = time.time()
     total_time = end_time - start_time
+    upload_time = sum(batch_upload_times) if batch_upload_times else 0
+    processing_time = sum(batch_processing_times) if batch_processing_times else 0
     cpu_end = process.cpu_percent()
     
     # Get memory statistics
@@ -809,12 +1088,32 @@ def benchmark_ingestion(
     peak_memory_mb = max(peak_memory_mb, max(memory_samples) if memory_samples else 0)
     avg_memory_mb = mean(memory_samples) if memory_samples else initial_memory
     
+    # Calculate batch time statistics
+    avg_batch_time = mean(batch_times) if batch_times else 0
+    avg_batch_upload_time = mean(batch_upload_times) if batch_upload_times else 0
+    avg_batch_processing_time = mean(batch_processing_times) if batch_processing_times else 0
+    
+    # Calculate percentiles for batch upload times
+    upload_percentiles = calculate_percentiles(batch_upload_times, [50, 95, 99])
+    min_batch_upload_time = min(batch_upload_times) if batch_upload_times else 0.0
+    max_batch_upload_time = max(batch_upload_times) if batch_upload_times else 0.0
+    median_batch_upload_time = upload_percentiles.get(50, 0.0)
+    p95_batch_upload_time = upload_percentiles.get(95, 0.0)
+    p99_batch_upload_time = upload_percentiles.get(99, 0.0)
+    
+    # Calculate percentiles for batch processing times
+    processing_percentiles = calculate_percentiles(batch_processing_times, [50, 95, 99])
+    min_batch_processing_time = min(batch_processing_times) if batch_processing_times else 0.0
+    max_batch_processing_time = max(batch_processing_times) if batch_processing_times else 0.0
+    median_batch_processing_time = processing_percentiles.get(50, 0.0)
+    p95_batch_processing_time = processing_percentiles.get(95, 0.0)
+    p99_batch_processing_time = processing_percentiles.get(99, 0.0)
+    
     # Calculate metrics
     records_per_second = records_processed / total_time if total_time > 0 else 0
     mb_per_second = file_size_mb / total_time if total_time > 0 else 0
     memory_efficiency = avg_memory_mb / records_processed if records_processed > 0 else 0
     success_rate = records_successful / records_processed if records_processed > 0 else 0
-    avg_batch_time = mean(batch_times) if batch_times else 0
     
     # Estimate number of records from file (if not already counted)
     if records_processed == 0:
@@ -833,7 +1132,8 @@ def benchmark_ingestion(
         num_records=records_processed,
         test_scenario="happy_path",
         total_time_seconds=total_time,
-        processing_time_seconds=total_time,  # Same as total for now
+        processing_time_seconds=processing_time,
+        upload_time_seconds=upload_time,
         records_per_second=records_per_second,
         mb_per_second=mb_per_second,
         peak_memory_mb=peak_memory_mb,
@@ -842,6 +1142,18 @@ def benchmark_ingestion(
         num_batches=num_batches,
         batch_size=batch_size,
         avg_batch_time_seconds=avg_batch_time,
+        avg_batch_upload_time_seconds=avg_batch_upload_time,
+        avg_batch_processing_time_seconds=avg_batch_processing_time,
+        min_batch_upload_time_seconds=min_batch_upload_time,
+        max_batch_upload_time_seconds=max_batch_upload_time,
+        median_batch_upload_time_seconds=median_batch_upload_time,
+        p95_batch_upload_time_seconds=p95_batch_upload_time,
+        p99_batch_upload_time_seconds=p99_batch_upload_time,
+        min_batch_processing_time_seconds=min_batch_processing_time,
+        max_batch_processing_time_seconds=max_batch_processing_time,
+        median_batch_processing_time_seconds=median_batch_processing_time,
+        p95_batch_processing_time_seconds=p95_batch_processing_time,
+        p99_batch_processing_time_seconds=p99_batch_processing_time,
         records_successful=records_successful,
         records_failed=records_failed,
         success_rate=success_rate,
@@ -1047,7 +1359,6 @@ def run_benchmark_suite(
     logger.info(f"✓ Wrote {len(all_results)} benchmark results to {output_csv}")
     
     return all_results
-
 
 def main():
     """Main entry point for academic benchmark suite."""
