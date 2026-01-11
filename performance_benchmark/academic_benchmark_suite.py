@@ -52,7 +52,7 @@ from src.infrastructure.config_manager import get_database_config
 from src.infrastructure.redaction_logger import get_redaction_logger
 from src.infrastructure.redaction_context import redaction_context
 import uuid
-import ipdb; ipdb.set_trace()
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -64,33 +64,39 @@ logger = logging.getLogger(__name__)
 @dataclass
 class BenchmarkMetrics:
     """Comprehensive benchmark metrics for a single run."""
-    # Test configuration
+    # Test configuration (required fields first)
     adapter_type: str  # csv, json, xml
     file_size_mb: float
     file_path: str
     num_records: int
-    test_scenario: str = "happy_path"  # happy_path, bad_data, xml_performance
     
-    # Timing metrics
+    # Timing metrics (required)
     total_time_seconds: float
     processing_time_seconds: float
     records_per_second: float
     mb_per_second: float
     
-    # Memory metrics
+    # Memory metrics (required)
     peak_memory_mb: float
     avg_memory_mb: float
     memory_efficiency_mb_per_record: float
     
-    # Batch metrics
+    # Batch metrics (required)
     num_batches: int
-    batch_size: Optional[int]
     avg_batch_time_seconds: float
     
-    # Success metrics
+    # Success metrics (required)
     records_successful: int
     records_failed: int
     success_rate: float
+    
+    # Additional metrics (required)
+    cpu_usage_percent: float
+    timestamp: str
+    
+    # Optional fields with defaults (must come after all required fields in Python 3.13+)
+    test_scenario: str = "happy_path"  # happy_path, bad_data, xml_performance
+    batch_size: Optional[int] = None
     
     # Circuit breaker metrics (for bad data scenarios)
     circuit_breaker_opened: bool = False
@@ -102,10 +108,6 @@ class BenchmarkMetrics:
     # XML-specific metrics
     xml_streaming_enabled: Optional[bool] = None
     xml_memory_efficiency: Optional[float] = None
-    
-    # Additional metrics
-    cpu_usage_percent: float
-    timestamp: str
 
 
 def estimate_records_for_size(target_size_mb: float, format_type: str) -> int:
