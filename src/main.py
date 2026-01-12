@@ -674,9 +674,16 @@ def process_ingestion(
         pipeline.cleanup()
 
 
-def main():
-        raise RuntimeError(f"Schema initialization failed: {schema_result.error}")
-    logger.info("Schema initialized successfully")
+# NOTE: This function is legacy/dead code and should be removed.
+# It references undefined variables (storage, adapter, source, schema_result).
+# The actual CLI entry point is the main() function defined later in this file.
+# This function is kept here temporarily to avoid breaking any potential imports,
+# but it should never be called.
+def _legacy_main():
+    raise NotImplementedError(
+        "This is legacy code that has been replaced. "
+        "Use the main() function defined later in this file instead."
+    )
     
     # Initialize redaction logger for this ingestion run
     redaction_logger = get_redaction_logger()
