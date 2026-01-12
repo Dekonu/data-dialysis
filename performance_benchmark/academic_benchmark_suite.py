@@ -43,14 +43,9 @@ from generate_json_test_file import generate_json_file
 from generate_csv_test_file import generate_csv_file
 from generate_bad_data import generate_bad_xml_file, generate_bad_json_file, generate_bad_csv_file
 
-# Import ingestion adapters
-from src.adapters.ingesters import get_adapter
-from src.adapters.storage import DuckDBAdapter, PostgreSQLAdapter
+# Import ingestion pipeline and utilities
+from src.main import IngestionPipeline, create_storage_adapter
 from src.domain.ports import Result, StoragePort
-from src.domain.guardrails import CircuitBreaker, CircuitBreakerConfig
-from src.infrastructure.config_manager import get_database_config
-from src.infrastructure.redaction_logger import get_redaction_logger
-from src.infrastructure.redaction_context import redaction_context
 from src.main import (
     ingestion_task,
     processing_task,
@@ -351,32 +346,28 @@ def benchmark_bad_data(
     batch_processing_times = []
     batch_times = []
     
-    # Get adapter (with config_path for XML files)
-    adapter_kwargs = {}
+    # Use IngestionPipeline for initialization
+    xml_config_path = None
     if adapter_type == "xml":
-        xml_config_path = project_root / "xml_config.json"
-        if xml_config_path.exists():
-            adapter_kwargs["config_path"] = str(xml_config_path)
+        xml_config_path_obj = project_root / "xml_config.json"
+        if xml_config_path_obj.exists():
+            xml_config_path = str(xml_config_path_obj)
         else:
-            logger.warning(f"XML config file not found at {xml_config_path}, XML adapter may fail")
+            logger.warning(f"XML config file not found at {xml_config_path_obj}, XML adapter may fail")
     
-    adapter = get_adapter(str(file_path), **adapter_kwargs)
-    if adapter is None:
-        raise ValueError(f"No adapter found for {file_path}")
-    
-    # Set up circuit breaker
-    circuit_breaker_config = CircuitBreakerConfig(
-        failure_threshold_percent=50.0,  # Default threshold
-        window_size=100,
-        min_records_before_check=10,
-        abort_on_open=False  # Don't abort, just track for benchmarking
+    # Create pipeline to get properly initialized adapter and infrastructure
+    pipeline = IngestionPipeline(
+        source=str(file_path),
+        storage=storage if storage else create_storage_adapter(),
+        xml_config_path=xml_config_path,
+        batch_size=batch_size,
+        enable_circuit_breaker=True  # Enable circuit breaker for bad data benchmarks
     )
-    circuit_breaker = CircuitBreaker(circuit_breaker_config)
-    
-    # Set up redaction logging
-    redaction_logger = get_redaction_logger()
-    ingestion_id = str(uuid.uuid4())
-    redaction_logger.set_ingestion_id(ingestion_id)
+    pipeline.initialize()
+    adapter = pipeline.adapter
+    circuit_breaker = pipeline.circuit_breaker
+    redaction_logger = pipeline.redaction_logger
+    ingestion_id = pipeline.ingestion_id
     
     # Track metrics
     records_processed = 0
@@ -670,20 +661,29 @@ def benchmark_xml_performance(
     batch_processing_times = []
     batch_times = []
     
-    # Get XML adapter with streaming configuration
-    xml_config_path = project_root / "xml_config.json"
-    adapter_kwargs = {"streaming_enabled": streaming_enabled}
-    if xml_config_path.exists():
-        adapter_kwargs["config_path"] = str(xml_config_path)
+    # Use IngestionPipeline for initialization
+    xml_config_path = None
+    xml_config_path_obj = project_root / "xml_config.json"
+    if xml_config_path_obj.exists():
+        xml_config_path = str(xml_config_path_obj)
     
-    adapter = get_adapter(str(file_path), **adapter_kwargs)
-    if adapter is None:
-        raise ValueError(f"No adapter found for {file_path}")
+    # Note: streaming_enabled is handled by XML adapter config, not pipeline
+    # Create pipeline to get properly initialized adapter and infrastructure
+    pipeline = IngestionPipeline(
+        source=str(file_path),
+        storage=storage if storage else create_storage_adapter(),
+        xml_config_path=xml_config_path,
+        batch_size=batch_size,
+        enable_circuit_breaker=False
+    )
+    pipeline.initialize()
+    adapter = pipeline.adapter
+    redaction_logger = pipeline.redaction_logger
+    ingestion_id = pipeline.ingestion_id
     
-    # Set up redaction logging
-    redaction_logger = get_redaction_logger()
-    ingestion_id = str(uuid.uuid4())
-    redaction_logger.set_ingestion_id(ingestion_id)
+    # Apply streaming configuration if needed (XML adapter specific)
+    if hasattr(adapter, 'streaming_enabled'):
+        adapter.streaming_enabled = streaming_enabled
     
     # Track metrics
     records_processed = 0
@@ -904,23 +904,32 @@ def benchmark_ingestion(
     # Task timing context for modular performance tracking
     task_timing = TaskTimingContext()
     
-    # Get adapter (with config_path for XML files)
-    adapter_kwargs = {}
+    # Use IngestionPipeline for initialization (but we'll iterate manually for metrics)
+    xml_config_path = None
     if adapter_type == "xml":
-        xml_config_path = project_root / "xml_config.json"
-        if xml_config_path.exists():
-            adapter_kwargs["config_path"] = str(xml_config_path)
+        xml_config_path_obj = project_root / "xml_config.json"
+        if xml_config_path_obj.exists():
+            xml_config_path = str(xml_config_path_obj)
         else:
-            logger.warning(f"XML config file not found at {xml_config_path}, XML adapter may fail")
+            logger.warning(f"XML config file not found at {xml_config_path_obj}, XML adapter may fail")
     
-    adapter = get_adapter(str(file_path), **adapter_kwargs)
-    if adapter is None:
-        raise ValueError(f"No adapter found for {file_path}")
+    # Create pipeline to get properly initialized adapter and infrastructure
+    # We'll use it for initialization but track metrics manually
+    pipeline = IngestionPipeline(
+        source=str(file_path),
+        storage=storage if storage else create_storage_adapter(),  # Create storage if not provided
+        xml_config_path=xml_config_path,
+        batch_size=batch_size,
+        enable_circuit_breaker=False  # Disable circuit breaker for benchmarks to track all results
+    )
     
-    # Set up redaction logging (required for redaction logs to be captured)
-    redaction_logger = get_redaction_logger()
-    ingestion_id = str(uuid.uuid4())
-    redaction_logger.set_ingestion_id(ingestion_id)
+    # Initialize pipeline to get adapter and infrastructure set up
+    pipeline.initialize()
+    
+    # Access initialized components from pipeline
+    adapter = pipeline.adapter
+    redaction_logger = pipeline.redaction_logger
+    ingestion_id = pipeline.ingestion_id
     
     # Track metrics
     records_processed = 0
@@ -934,7 +943,9 @@ def benchmark_ingestion(
     cpu_start = process.cpu_percent(interval=0.1)  # Get initial CPU with small interval
     
     try:
-        # Set up redaction context (required for redaction logging to work)
+        # Use pipeline's redaction context (already set up in initialize)
+        # We'll iterate manually but use the pipeline's context
+        from src.infrastructure.redaction_context import redaction_context
         with redaction_context(
             logger=redaction_logger,
             source_adapter=adapter.adapter_name,
@@ -1088,32 +1099,19 @@ def benchmark_ingestion(
                 num_batches += 1
             
             # Flush redaction logs if storage is available (after all records processed)
-            if storage and hasattr(storage, 'flush_redaction_logs'):
-                try:
-                    redaction_logs = redaction_logger.get_logs()
-                    if redaction_logs:
-                        flush_result = storage.flush_redaction_logs(redaction_logs)
-                        if flush_result.is_success():
-                            logger.debug(f"Flushed {flush_result.value} redaction logs to storage")
-                        else:
-                            logger.warning(f"Failed to flush redaction logs: {flush_result.error}")
-                        redaction_logger.clear_logs()
-                except Exception as e:
-                    logger.warning(f"Failed to flush redaction logs: {e}")
+            # Use pipeline's cleanup method which handles log flushing
+            if storage:
+                pipeline.cleanup()
     
     except Exception as e:
         logger.error(f"Error during ingestion: {e}", exc_info=True)
         records_failed += records_processed - records_successful
         
-        # Try to flush logs even on error
-        if storage and hasattr(storage, 'flush_redaction_logs'):
-            try:
-                redaction_logs = redaction_logger.get_logs()
-                if redaction_logs:
-                    storage.flush_redaction_logs(redaction_logs)
-                    redaction_logger.clear_logs()
-            except Exception:
-                pass  # Ignore errors during error handling
+        # Try to cleanup pipeline even on error
+        try:
+            pipeline.cleanup()
+        except Exception:
+            pass  # Ignore errors during error handling
     
     # End timing
     end_time = time.time()
@@ -1176,11 +1174,11 @@ def benchmark_ingestion(
         total_time_seconds=total_time,
         processing_time_seconds=processing_time,
         upload_time_seconds=upload_time,
-        ingestion_time_seconds=ingestion_time,
-        processing_task_time_seconds=processing_task_time,
-        persistence_time_seconds=persistence_time,
-        raw_vault_time_seconds=raw_vault_time,
-        cdc_time_seconds=cdc_time,
+        ingestion_time_seconds=task_timing.get_timings().get('ingestion_time', 0.0),
+        processing_task_time_seconds=task_timing.get_timings().get('processing_time', 0.0),
+        persistence_time_seconds=task_timing.get_timings().get('persistence_time', 0.0),
+        raw_vault_time_seconds=task_timing.get_timings().get('raw_vault_time', 0.0),
+        cdc_time_seconds=task_timing.get_timings().get('cdc_time', 0.0),
         records_per_second=records_per_second,
         mb_per_second=mb_per_second,
         peak_memory_mb=peak_memory_mb,
@@ -1235,24 +1233,12 @@ def run_benchmark_suite(
     
     all_results = []
     
-    # Initialize storage adapter if needed (for redaction log flushing)
+    # Initialize storage adapter if needed (using modularized pipeline utilities)
     storage = None
     if use_storage:
         try:
-            db_config = get_database_config()
-            if db_config.db_type == "duckdb":
-                storage = DuckDBAdapter(db_config=db_config)
-            elif db_config.db_type == "postgresql":
-                storage = PostgreSQLAdapter(db_config=db_config)
-            
-            # Initialize schema
-            if storage:
-                schema_result = storage.initialize_schema()
-                if not schema_result.is_success():
-                    logger.warning(f"Schema initialization failed: {schema_result.error}, continuing without storage")
-                    storage = None
-                else:
-                    logger.info(f"Storage adapter initialized: {db_config.db_type}")
+            storage = create_storage_adapter()
+            logger.info(f"Storage adapter initialized via IngestionPipeline utilities")
         except Exception as e:
             logger.warning(f"Failed to initialize storage adapter: {e}, continuing without storage")
             storage = None
