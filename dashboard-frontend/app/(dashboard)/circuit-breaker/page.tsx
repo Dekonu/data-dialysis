@@ -3,6 +3,10 @@ import { api } from '@/lib/api';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { RealtimeCircuitBreaker } from '@/components/dashboard/realtime-circuit-breaker';
 
+// Force dynamic rendering - don't statically generate this page
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 async function CircuitBreakerContent() {
   let status;
   let error: string | null = null;

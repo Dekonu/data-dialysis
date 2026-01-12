@@ -545,27 +545,27 @@ class JSONIngester(IngestionPort):
                     )
         
         # Apply vectorized redaction to PII columns that don't have pattern constraints
-        if 'ssn' in df_redacted.columns:
+        if 'ssn' in df_redacted.columns and len(df_redacted) > 0:
             original_ssn = df_redacted['ssn'].copy()
             df_redacted['ssn'] = RedactorService.redact_ssn(df_redacted['ssn'])
             log_vectorized_redactions(df_redacted['ssn'], 'ssn', 'SSN_PATTERN', original_ssn)
         
-        if 'first_name' in df_redacted.columns:
+        if 'first_name' in df_redacted.columns and len(df_redacted) > 0:
             original_first_name = df_redacted['first_name'].copy()
             df_redacted['first_name'] = RedactorService.redact_name(df_redacted['first_name'])
             log_vectorized_redactions(df_redacted['first_name'], 'first_name', 'NAME_PATTERN', original_first_name)
         
-        if 'last_name' in df_redacted.columns:
+        if 'last_name' in df_redacted.columns and len(df_redacted) > 0:
             original_last_name = df_redacted['last_name'].copy()
             df_redacted['last_name'] = RedactorService.redact_name(df_redacted['last_name'])
             log_vectorized_redactions(df_redacted['last_name'], 'last_name', 'NAME_PATTERN', original_last_name)
         
-        if 'phone' in df_redacted.columns:
+        if 'phone' in df_redacted.columns and len(df_redacted) > 0:
             original_phone = df_redacted['phone'].copy()
             df_redacted['phone'] = RedactorService.redact_phone(df_redacted['phone'])
             log_vectorized_redactions(df_redacted['phone'], 'phone', 'PHONE_PATTERN', original_phone)
         
-        if 'email' in df_redacted.columns:
+        if 'email' in df_redacted.columns and len(df_redacted) > 0:
             original_email = df_redacted['email'].copy()
             df_redacted['email'] = RedactorService.redact_email(df_redacted['email'])
             log_vectorized_redactions(df_redacted['email'], 'email', 'EMAIL_PATTERN', original_email)

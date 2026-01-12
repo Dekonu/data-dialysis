@@ -151,6 +151,10 @@ class RedactorService:
         """
         # Vectorized operation for pandas Series
         if isinstance(value, pd.Series):
+            # Handle empty Series
+            if len(value) == 0:
+                return value.copy()
+            
             # Use vectorized string operations (fastest)
             # Handle NaN values properly
             result = value.copy().astype(str)
@@ -158,15 +162,21 @@ class RedactorService:
             result = result.replace('nan', '')
             
             # Create mask for values that match SSN pattern
-            mask = result.str.contains(RedactorService.SSN_PATTERN.pattern, regex=True, na=False)
-            # Also check for 9-digit numbers without separators
-            cleaned = result.str.replace(r'[-\s]', '', regex=True)
-            nine_digit_mask = cleaned.str.isdigit() & (cleaned.str.len() == 9)
+            # Defensive check: ensure result is not empty before string operations
+            if len(result) > 0:
+                mask = result.str.contains(RedactorService.SSN_PATTERN.pattern, regex=True, na=False)
+                # Also check for 9-digit numbers without separators
+                cleaned = result.str.replace(r'[-\s]', '', regex=True)
+                nine_digit_mask = cleaned.str.isdigit() & (cleaned.str.len() == 9)
+                
+                # Apply redaction where either condition is true
+                result[mask | nine_digit_mask] = RedactorService.SSN_MASK
+                # Restore original NaN values
+                result[value.isna()] = None
+            else:
+                # Empty result, just restore NaN values
+                result[value.isna()] = None
             
-            # Apply redaction where either condition is true
-            result[mask | nine_digit_mask] = RedactorService.SSN_MASK
-            # Restore original NaN values
-            result[value.isna()] = None
             return result
         
         # Scalar operation (backward compatible)
@@ -200,11 +210,18 @@ class RedactorService:
         """
         # Vectorized operation for pandas Series
         if isinstance(value, pd.Series):
+            # Handle empty Series
+            if len(value) == 0:
+                return value.copy()
+            
             result = value.copy().astype(str)
             result = result.replace('nan', '')
-            mask = result.str.contains(RedactorService.PHONE_PATTERN.pattern, regex=True, na=False)
-            result[mask] = RedactorService.PHONE_MASK
-            result[value.isna()] = None
+            if len(result) > 0:
+                mask = result.str.contains(RedactorService.PHONE_PATTERN.pattern, regex=True, na=False)
+                result[mask] = RedactorService.PHONE_MASK
+                result[value.isna()] = None
+            else:
+                result[value.isna()] = None
             return result
         
         # Scalar operation (backward compatible)
@@ -239,11 +256,18 @@ class RedactorService:
         """
         # Vectorized operation for pandas Series
         if isinstance(value, pd.Series):
+            # Handle empty Series
+            if len(value) == 0:
+                return value.copy()
+            
             result = value.copy().astype(str)
             result = result.replace('nan', '')
-            mask = result.str.contains(RedactorService.EMAIL_PATTERN.pattern, regex=True, na=False)
-            result[mask] = RedactorService.EMAIL_MASK
-            result[value.isna()] = None
+            if len(result) > 0:
+                mask = result.str.contains(RedactorService.EMAIL_PATTERN.pattern, regex=True, na=False)
+                result[mask] = RedactorService.EMAIL_MASK
+                result[value.isna()] = None
+            else:
+                result[value.isna()] = None
             return result
         
         # Scalar operation (backward compatible)
@@ -278,23 +302,30 @@ class RedactorService:
         """
         # Vectorized operation for pandas Series
         if isinstance(value, pd.Series):
+            # Handle empty Series
+            if len(value) == 0:
+                return value.copy()
+            
             result = value.copy().astype(str)
             result = result.replace('nan', '')
-            value_str = result.str.strip()
-            # Security: Redact if it contains XSS patterns
-            xss_patterns = ['<script', '<img', '<iframe', 'javascript:', 'onerror=', 'onload=']
-            xss_mask = value_str.str.lower().str.contains('|'.join(xss_patterns), na=False, regex=False)
-            result[xss_mask] = RedactorService.NAME_MASK
-            
-            # Simple heuristic: if it looks like a name (capitalized, 1-3 words)
-            name_mask = (
-                (value_str.str.len() > 0) &
-                (value_str.str[0].str.isupper()) &
-                (value_str.str.split().str.len() <= 3) &
-                (~xss_mask)  # Don't double-redact XSS patterns
-            )
-            result[name_mask] = RedactorService.NAME_MASK
-            result[value.isna()] = None
+            if len(result) > 0:
+                value_str = result.str.strip()
+                # Security: Redact if it contains XSS patterns
+                xss_patterns = ['<script', '<img', '<iframe', 'javascript:', 'onerror=', 'onload=']
+                xss_mask = value_str.str.lower().str.contains('|'.join(xss_patterns), na=False, regex=False)
+                result[xss_mask] = RedactorService.NAME_MASK
+                
+                # Simple heuristic: if it looks like a name (capitalized, 1-3 words)
+                name_mask = (
+                    (value_str.str.len() > 0) &
+                    (value_str.str[0].str.isupper()) &
+                    (value_str.str.split().str.len() <= 3) &
+                    (~xss_mask)  # Don't double-redact XSS patterns
+                )
+                result[name_mask] = RedactorService.NAME_MASK
+                result[value.isna()] = None
+            else:
+                result[value.isna()] = None
             return result
         
         # Scalar operation (backward compatible)
@@ -331,13 +362,20 @@ class RedactorService:
         """
         # Vectorized operation for pandas Series
         if isinstance(value, pd.Series):
+            # Handle empty Series
+            if len(value) == 0:
+                return value.copy()
+            
             result = value.copy().astype(str)
             result = result.replace('nan', '')
-            value_str = result.str.strip()
-            # Addresses typically contain numbers and street names
-            mask = value_str.str.contains(r'\d', regex=True, na=False)  # Contains digits
-            result[mask] = RedactorService.ADDRESS_MASK
-            result[value.isna()] = None
+            if len(result) > 0:
+                value_str = result.str.strip()
+                # Addresses typically contain numbers and street names
+                mask = value_str.str.contains(r'\d', regex=True, na=False)  # Contains digits
+                result[mask] = RedactorService.ADDRESS_MASK
+                result[value.isna()] = None
+            else:
+                result[value.isna()] = None
             return result
         
         # Scalar operation (backward compatible)
