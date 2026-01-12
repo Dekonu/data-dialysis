@@ -103,7 +103,7 @@ def print_security_report_summary(report: dict) -> None:
         print(f"Period End: {report['end_timestamp']}")
     
     if summary.get('total_redactions', 0) == 0:
-        print("\n⚠ No redaction events logged.")
+        print("\nWARNING: No redaction events logged.")
         print("  Note: Redaction logging may not be fully integrated.")
         print("  Redactions still occur but may not be logged to the logs table.")
     else:

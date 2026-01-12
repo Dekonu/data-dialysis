@@ -44,7 +44,7 @@ def create_storage_adapter_cli() -> StoragePort:
         from src.main import create_storage_adapter
         return create_storage_adapter()
     except Exception as e:
-        console.print(f"[red]✗[/red] Failed to create storage adapter: {str(e)}")
+        console.print(f"[red]FAILED[/red] Failed to create storage adapter: {str(e)}")
         raise typer.Exit(code=1)
 
 
@@ -78,7 +78,7 @@ def ingest(
     
     # Validate XML config if needed
     if input_file.suffix.lower() == '.xml' and not xml_config:
-        console.print("[red]✗[/red] XML files require --xml-config option")
+        console.print("[red]FAILED[/red] XML files require --xml-config option")
         raise typer.Exit(code=1)
     
     # Print startup information
@@ -97,7 +97,7 @@ def ingest(
         with console.status("[bold green]Initializing storage...") as status:
             storage = create_storage_adapter_cli()
     except Exception as e:
-        console.print(f"[red]✗[/red] Failed to initialize storage: {str(e)}")
+        console.print(f"[red]FAILED[/red] Failed to initialize storage: {str(e)}")
         raise typer.Exit(code=1)
     
     # Process ingestion
@@ -155,28 +155,28 @@ def ingest(
                             ingestion_id=ingestion_id
                         )
                         if save_result.is_success():
-                            console.print(f"\n[green]✓[/green] Security report saved: {report_file}")
+                            console.print(f"\n[green]SUCCESS[/green] Security report saved: {report_file}")
                 else:
-                    console.print(f"[yellow]⚠[/yellow] Failed to generate security report: {report_result.error}")
+                    console.print(f"[yellow]WARNING[/yellow] Failed to generate security report: {report_result.error}")
             except Exception as e:
-                console.print(f"[yellow]⚠[/yellow] Error generating security report: {str(e)}")
+                console.print(f"[yellow]WARNING[/yellow] Error generating security report: {str(e)}")
         
         # Exit with appropriate code
         if failure_count > 0:
-            console.print(f"\n[yellow]⚠[/yellow] Ingestion completed with {failure_count} failures")
+            console.print(f"\n[yellow]WARNING[/yellow] Ingestion completed with {failure_count} failures")
             raise typer.Exit(code=1)
         else:
-            console.print(f"\n[green]✓[/green] Ingestion completed successfully")
+            console.print(f"\n[green]SUCCESS[/green] Ingestion completed successfully")
             raise typer.Exit(code=0)
     
     except KeyboardInterrupt:
-        console.print("\n[yellow]⚠[/yellow] Ingestion interrupted by user")
+        console.print("\n[yellow]WARNING[/yellow] Ingestion interrupted by user")
         raise typer.Exit(code=130)
     except typer.Exit:
         # Re-raise typer.Exit exceptions (they're used for normal program termination)
         raise
     except Exception as e:
-        console.print(f"\n[red]✗[/red] Ingestion failed: {str(e)}")
+        console.print(f"\n[red]FAILED[/red] Ingestion failed: {str(e)}")
         if verbose:
             import traceback
             console.print_exception()
@@ -215,13 +215,13 @@ def benchmark(
         from benchmark_xml_ingestion import benchmark_file, format_time
         from pathlib import Path as PathLib
     except ImportError:
-        console.print("[red]✗[/red] Benchmark module not found. Run from project root.")
+        console.print("[red]FAILED[/red] Benchmark module not found. Run from project root.")
         raise typer.Exit(code=1)
     
     # Find test files
     test_files = sorted(test_data_dir.glob("test_data_*.xml"))
     if not test_files:
-        console.print(f"[red]✗[/red] No test files found in {test_data_dir}")
+        console.print(f"[red]FAILED[/red] No test files found in {test_data_dir}")
         raise typer.Exit(code=1)
     
     console.print(f"Found {len(test_files)} test files:\n")
@@ -242,7 +242,7 @@ def benchmark(
             )
             all_results.append(result)
         except Exception as e:
-            console.print(f"[red]✗[/red] Failed to benchmark {test_file.name}: {str(e)}")
+            console.print(f"[red]FAILED[/red] Failed to benchmark {test_file.name}: {str(e)}")
             continue
     
     # Print summary
@@ -267,9 +267,9 @@ def benchmark(
             )
         
         console.print(summary_table)
-        console.print("\n[green]✓[/green] Benchmark complete")
+        console.print("\n[green]SUCCESS[/green] Benchmark complete")
     else:
-        console.print("[red]✗[/red] No benchmark results to display")
+        console.print("[red]FAILED[/red] No benchmark results to display")
         raise typer.Exit(code=1)
 
 

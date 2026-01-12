@@ -37,7 +37,7 @@ except (ImportError, Exception) as e:
         python_version = sys.version_info
         if python_version >= (3, 14):
             logger.warning(
-                f"⚠️ SpaCy is incompatible with Python {python_version.major}.{python_version.minor}. "
+                f"WARNING: SpaCy is incompatible with Python {python_version.major}.{python_version.minor}. "
                 f"SpaCy requires Python 3.11-3.13. "
                 f"See docs/SPACY_PYTHON314_WARNING.md for solutions. "
                 f"Falling back to regex-based redaction (this works fine!)."

@@ -38,7 +38,7 @@ def create_sample_csv(file_path: Path):
         writer = csv.writer(f)
         writer.writerows(csv_data)
     
-    print(f"✓ Created CSV file: {file_path}")
+    print(f"SUCCESS: Created CSV file: {file_path}")
     print(f"  Records: {len(csv_data) - 1} (excluding header)")
     print(f"  Contains PII: Names, SSNs, Phone, Email, Address, DOB")
 
@@ -93,7 +93,7 @@ def create_sample_json(file_path: Path):
     with open(file_path, "w", encoding="utf-8") as f:
         json.dump(json_data, f, indent=2)
     
-    print(f"✓ Created JSON file: {file_path}")
+    print(f"SUCCESS: Created JSON file: {file_path}")
     print(f"  Records: {len(json_data)}")
     print(f"  Contains: Patient, Encounter, Observation data with PII")
 
@@ -154,8 +154,8 @@ def create_sample_xml(file_path: Path, config_file: Path):
     with open(config_file, "w", encoding="utf-8") as f:
         json.dump(xml_config, f, indent=2)
     
-    print(f"✓ Created XML file: {file_path}")
-    print(f"✓ Created XML config: {config_file}")
+    print(f"SUCCESS: Created XML file: {file_path}")
+    print(f"SUCCESS: Created XML config: {config_file}")
     print(f"  Records: 1")
     print(f"  Contains PII: Name, SSN, Phone, Email, Address, DOB")
 
@@ -163,7 +163,7 @@ def create_sample_xml(file_path: Path, config_file: Path):
 def display_security_report(report_file: Path):
     """Display the security report in a readable format."""
     if not report_file.exists():
-        print(f"\n⚠ Security report not found: {report_file}")
+        print(f"\nWARNING: Security report not found: {report_file}")
         return
     
     print("\n" + "=" * 70)
@@ -178,29 +178,29 @@ def display_security_report(report_file: Path):
     print(f"\nReport Timestamp: {report.get('report_timestamp', 'N/A')}")
     print(f"Ingestion ID: {report.get('ingestion_id', 'N/A')}")
     
-    print(f"\n📊 SUMMARY")
+    print(f"\nSUMMARY")
     print(f"  Total Redactions: {summary.get('total_redactions', 0)}")
     
-    print(f"\n📋 Redactions by Field:")
+    print(f"\nRedactions by Field:")
     for field, count in sorted(summary.get('redactions_by_field', {}).items()):
         print(f"    {field}: {count}")
     
-    print(f"\n🔒 Redactions by Rule:")
+    print(f"\nRedactions by Rule:")
     for rule, count in sorted(summary.get('redactions_by_rule', {}).items()):
         print(f"    {rule}: {count}")
     
-    print(f"\n🔌 Redactions by Adapter:")
+    print(f"\nRedactions by Adapter:")
     for adapter, count in sorted(summary.get('redactions_by_adapter', {}).items()):
         print(f"    {adapter}: {count}")
     
     # Show sample events
     events = report.get('events', [])
     if events:
-        print(f"\n📝 Sample Events (showing first 5 of {len(events)}):")
+        print(f"\nSample Events (showing first 5 of {len(events)}):")
         for i, event in enumerate(events[:5], 1):
             print(f"    {i}. {event.get('field_name')} - {event.get('rule_triggered')} at {event.get('timestamp')}")
     
-    print(f"\n📄 Full report saved to: {report_file}")
+    print(f"\nFull report saved to: {report_file}")
     print("=" * 70)
 
 
@@ -293,13 +293,13 @@ def main():
         print("\n[Step 2] Processing CSV file with src/main.py...")
         success, output = run_main_pipeline(csv_file, db_path=db_path)
         if success:
-            print("✓ CSV processing completed")
+            print("SUCCESS: CSV processing completed")
             # Extract ingestion ID from output if possible
             if "Ingestion ID:" in output:
                 ingestion_id = output.split("Ingestion ID:")[1].split()[0].strip()
                 print(f"  Ingestion ID: {ingestion_id}")
         else:
-            print("✗ CSV processing failed")
+            print("FAILED: CSV processing failed")
         
         # Find and display security report
         latest_report = find_latest_security_report(reports_dir)
@@ -311,9 +311,9 @@ def main():
         print("\n[Step 4] Processing JSON file with src/main.py...")
         success, output = run_main_pipeline(json_file, db_path=db_path)
         if success:
-            print("✓ JSON processing completed")
+            print("SUCCESS: JSON processing completed")
         else:
-            print("✗ JSON processing failed")
+            print("FAILED: JSON processing failed")
         
         # Find and display latest security report
         latest_report = find_latest_security_report(reports_dir)
@@ -325,9 +325,9 @@ def main():
         print("\n[Step 6] Processing XML file with src/main.py...")
         success, output = run_main_pipeline(xml_file, xml_config=xml_config_file, db_path=db_path)
         if success:
-            print("✓ XML processing completed")
+            print("SUCCESS: XML processing completed")
         else:
-            print("✗ XML processing failed")
+            print("FAILED: XML processing failed")
         
         # Find and display latest security report
         latest_report = find_latest_security_report(reports_dir)
@@ -339,9 +339,9 @@ def main():
         print("\n" + "=" * 70)
         print("SUMMARY")
         print("=" * 70)
-        print(f"✓ Processed 3 files (CSV, JSON, XML)")
-        print(f"✓ Database: {db_path}")
-        print(f"✓ Security reports saved to: {reports_dir}")
+        print(f"SUCCESS: Processed 3 files (CSV, JSON, XML)")
+        print(f"SUCCESS: Database: {db_path}")
+        print(f"SUCCESS: Security reports saved to: {reports_dir}")
         print(f"\nAll security reports are available in: {reports_dir}")
         print("Each report contains:")
         print("  - Total redaction count")

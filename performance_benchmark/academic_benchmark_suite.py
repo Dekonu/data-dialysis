@@ -1269,12 +1269,12 @@ def run_benchmark_suite(
                     )
                     all_results.append(metrics)
                     
-                    logger.info(f"  ✓ {size_mb}MB: {metrics.records_per_second:.0f} rec/s, "
-                              f"{metrics.peak_memory_mb:.1f}MB peak, "
-                              f"{metrics.total_time_seconds:.2f}s")
+                    logger.info(f"  SUCCESS {size_mb}MB: {metrics.records_per_second:.0f} rec/s, "
+                                f"{metrics.peak_memory_mb:.1f}MB peak, "
+                                f"{metrics.total_time_seconds:.2f}s")
                     
                 except Exception as e:
-                    logger.error(f"  ✗ Failed to benchmark {file_path}: {e}")
+                    logger.error(f"  FAILED to benchmark {file_path}: {e}")
                     continue
     
     # Run bad data benchmarks
@@ -1312,7 +1312,7 @@ def run_benchmark_suite(
                     bad_file = bad_data_dir / f"bad_csv_{int(failure_rate)}pct.csv"
                     if not bad_file.exists():
                         logger.info(f"  Generating {bad_file.name}...")
-                        generate_bad_csv_file(
+                        generate_bad_csv_file( 
                             output_path=bad_file,
                             num_records=1000,
                             failure_rate_percent=failure_rate
@@ -1330,13 +1330,13 @@ def run_benchmark_suite(
                         all_results.append(metrics)
                         
                         cb_status = "OPEN" if metrics.circuit_breaker_opened else "CLOSED"
-                        logger.info(f"  ✓ {adapter_type.upper()} {int(failure_rate)}% failures: "
+                        logger.info(f"  SUCCESS {adapter_type.upper()} {int(failure_rate)}% failures: "
                                   f"CB={cb_status}, "
                                   f"failure_rate={metrics.circuit_breaker_failure_rate:.1f}%, "
                                   f"{metrics.records_per_second:.0f} rec/s")
                         
                     except Exception as e:
-                        logger.error(f"  ✗ Failed to benchmark bad data {bad_file}: {e}")
+                        logger.error(f"  FAILED to benchmark bad data {bad_file}: {e}")
                         continue
     
     # Run XML performance benchmarks (streaming vs non-streaming)
@@ -1361,13 +1361,13 @@ def run_benchmark_suite(
                     all_results.append(metrics)
                     
                     mode = "streaming" if streaming_enabled else "non-streaming"
-                    logger.info(f"  ✓ {size_mb}MB XML ({mode}): "
+                    logger.info(f"  SUCCESS {size_mb}MB XML ({mode}): "
                               f"{metrics.records_per_second:.0f} rec/s, "
                               f"{metrics.peak_memory_mb:.1f}MB peak, "
                               f"{metrics.total_time_seconds:.2f}s")
                     
                 except Exception as e:
-                    logger.error(f"  ✗ Failed to benchmark XML performance {file_path}: {e}")
+                    logger.error(f"  FAILED to benchmark XML performance {file_path}: {e}")
                     continue
     
     # Write results to CSV
@@ -1390,7 +1390,7 @@ def run_benchmark_suite(
         for result in all_results:
             writer.writerow(asdict(result))
     
-    logger.info(f"✓ Wrote {len(all_results)} benchmark results to {output_csv}")
+    logger.info(f"SUCCESS: Wrote {len(all_results)} benchmark results to {output_csv}")
     
     return all_results
 

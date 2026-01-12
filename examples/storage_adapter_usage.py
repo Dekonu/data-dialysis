@@ -24,9 +24,9 @@ def example_duckdb_with_config():
     # Initialize schema
     result = adapter.initialize_schema()
     if result.is_success():
-        print("✓ Schema initialized successfully")
+        print("SUCCESS: Schema initialized successfully")
     else:
-        print(f"✗ Schema initialization failed: {result.error}")
+        print(f"FAILED: Schema initialization failed: {result.error}")
         return
     
     # Example: Create a test record (in real usage, this would come from ingestion)
@@ -39,9 +39,9 @@ def example_duckdb_with_config():
     # Persist record
     result = adapter.persist(golden_record)
     if result.is_success():
-        print(f"✓ Record persisted with ID: {result.value}")
+        print(f"SUCCESS: Record persisted with ID: {result.value}")
     else:
-        print(f"✗ Persistence failed: {result.error}")
+        print(f"FAILED: Persistence failed: {result.error}")
     
     adapter.close()
 
@@ -69,9 +69,9 @@ def example_postgresql_with_config():
     # Initialize schema
     result = adapter.initialize_schema()
     if result.is_success():
-        print("✓ Schema initialized successfully")
+        print("SUCCESS: Schema initialized successfully")
     else:
-        print(f"✗ Schema initialization failed: {result.error}")
+        print(f"FAILED: Schema initialization failed: {result.error}")
         return
     
     # Example: Create a test record
@@ -84,9 +84,9 @@ def example_postgresql_with_config():
     # Persist record
     result = adapter.persist(golden_record)
     if result.is_success():
-        print(f"✓ Record persisted with ID: {result.value}")
+        print(f"SUCCESS: Record persisted with ID: {result.value}")
     else:
-        print(f"✗ Persistence failed: {result.error}")
+        print(f"FAILED: Persistence failed: {result.error}")
     
     adapter.close()
 
@@ -114,7 +114,7 @@ def example_config_from_file():
     
     # Create adapter
     adapter = DuckDBAdapter(db_config=db_config)
-    print(f"✓ Adapter created with database path: {db_config.db_path}")
+    print(f"SUCCESS: Adapter created with database path: {db_config.db_path}")
     
     # Clean up
     import os
@@ -128,7 +128,7 @@ def example_backward_compatibility():
     
     # DuckDB: Can still use db_path directly
     adapter = DuckDBAdapter(db_path=":memory:")
-    print("✓ DuckDB adapter created with direct db_path parameter")
+    print("SUCCESS: DuckDB adapter created with direct db_path parameter")
     adapter.close()
     
     # PostgreSQL: Can still use connection string or individual parameters
@@ -139,7 +139,7 @@ def example_backward_compatibility():
         username="user",
         password="pass"
     )
-    print("✓ PostgreSQL adapter created with direct parameters")
+    print("SUCCESS: PostgreSQL adapter created with direct parameters")
     adapter.close()
 
 

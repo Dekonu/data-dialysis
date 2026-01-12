@@ -37,7 +37,7 @@ def create_sample_csv(file_path: Path):
         writer = csv.writer(f)
         writer.writerows(csv_data)
     
-    print(f"✓ Created CSV file: {file_path}")
+    print(f"SUCCESS: Created CSV file: {file_path}")
     print(f"  Records: {len(csv_data) - 1} (excluding header)")
     print(f"  Contains PII: Names, SSNs, Phone, Email, Address, DOB")
 
@@ -92,7 +92,7 @@ def create_sample_json(file_path: Path):
     with open(file_path, "w", encoding="utf-8") as f:
         json.dump(json_data, f, indent=2)
     
-    print(f"✓ Created JSON file: {file_path}")
+    print(f"SUCCESS: Created JSON file: {file_path}")
     print(f"  Records: {len(json_data)}")
     print(f"  Contains: Patient, Encounter, Observation data with PII")
 
@@ -130,7 +130,7 @@ def create_sample_xml(file_path: Path):
 </ClinicalData>"""
     
     file_path.write_text(xml_data, encoding="utf-8")
-    print(f"✓ Created XML file: {file_path}")
+    print(f"SUCCESS: Created XML file: {file_path}")
     print(f"  Contains PII: Name, SSN, Phone, Email, Address, DOB, Notes")
 
 
@@ -163,7 +163,7 @@ def create_xml_config(file_path: Path):
     with open(file_path, "w") as f:
         json.dump(xml_config, f, indent=2)
     
-    print(f"✓ Created XML config file: {file_path}")
+    print(f"SUCCESS: Created XML config file: {file_path}")
 
 
 def demonstrate_csv_flow(csv_file: Path, db_path: str):
@@ -178,12 +178,12 @@ def demonstrate_csv_flow(csv_file: Path, db_path: str):
     storage = DuckDBAdapter(db_config=db_config)
     result = storage.initialize_schema()
     assert result.is_success(), f"Schema initialization failed: {result.error}"
-    print("✓ Schema initialized")
+    print("SUCCESS: Schema initialized")
     
     # Step 2: Get CSV adapter
     print("\n[Step 2] Getting CSV ingestion adapter...")
     adapter = get_adapter(str(csv_file))
-    print(f"✓ Adapter: {adapter.__class__.__name__}")
+    print(f"SUCCESS: Adapter: {adapter.__class__.__name__}")
     
     # Step 3: Ingest CSV (returns DataFrames with redacted PII)
     print("\n[Step 3] Ingesting CSV file...")
@@ -209,11 +209,11 @@ def demonstrate_csv_flow(csv_file: Path, db_path: str):
             persist_result = storage.persist_dataframe(df, "patients")
             if persist_result.is_success():
                 total_rows += persist_result.value
-                print(f"    ✓ Persisted {persist_result.value} rows")
+                print(f"    SUCCESS: Persisted {persist_result.value} rows")
             else:
-                print(f"    ✗ Failed: {persist_result.error}")
+                print(f"    FAILED: {persist_result.error}")
         else:
-            print(f"  ✗ Chunk {i} failed: {result.error}")
+            print(f"  FAILED: Chunk {i} failed: {result.error}")
     
     # Step 5: Verify data in DuckDB
     print("\n[Step 4] Verifying data in DuckDB...")
@@ -244,7 +244,7 @@ def demonstrate_csv_flow(csv_file: Path, db_path: str):
     print(f"\n  Audit log entries: {audit_count}")
     
     storage.close()
-    print("\n✓ CSV flow completed successfully!")
+    print("\nSUCCESS: CSV flow completed successfully!")
 
 
 def demonstrate_json_flow(json_file: Path, db_path: str):
@@ -260,7 +260,7 @@ def demonstrate_json_flow(json_file: Path, db_path: str):
     
     # Get adapter
     adapter = get_adapter(str(json_file))
-    print(f"\n✓ Adapter: {adapter.__class__.__name__}")
+    print(f"\nSUCCESS: Adapter: {adapter.__class__.__name__}")
     
     # Process
     print("\n[Processing] Ingesting JSON file...")
@@ -286,7 +286,7 @@ def demonstrate_json_flow(json_file: Path, db_path: str):
             
             persist_result = storage.persist_dataframe(df, table)
             if persist_result.is_success():
-                print(f"  ✓ Persisted {persist_result.value} rows to {table}")
+                print(f"  SUCCESS: Persisted {persist_result.value} rows to {table}")
     
     # Verify
     conn = storage._get_connection()
@@ -300,7 +300,7 @@ def demonstrate_json_flow(json_file: Path, db_path: str):
     print(f"    Observations: {observation_count}")
     
     storage.close()
-    print("\n✓ JSON flow completed successfully!")
+    print("\nSUCCESS: JSON flow completed successfully!")
 
 
 def demonstrate_xml_flow(xml_file: Path, xml_config_file: Path, db_path: str):
@@ -316,7 +316,7 @@ def demonstrate_xml_flow(xml_file: Path, xml_config_file: Path, db_path: str):
     
     # Get adapter
     adapter = get_adapter(str(xml_file), config_path=str(xml_config_file))
-    print(f"\n✓ Adapter: {adapter.__class__.__name__}")
+    print(f"\nSUCCESS: Adapter: {adapter.__class__.__name__}")
     
     # Process
     print("\n[Processing] Ingesting XML file...")
@@ -336,7 +336,7 @@ def demonstrate_xml_flow(xml_file: Path, xml_config_file: Path, db_path: str):
             
             persist_result = storage.persist(golden_record)
             if persist_result.is_success():
-                print(f"  ✓ Persisted record ID: {persist_result.value}")
+                print(f"  SUCCESS: Persisted record ID: {persist_result.value}")
     
     # Verify
     conn = storage._get_connection()
@@ -344,7 +344,7 @@ def demonstrate_xml_flow(xml_file: Path, xml_config_file: Path, db_path: str):
     print(f"\n  Total patients in DB: {patient_count}")
     
     storage.close()
-    print("\n✓ XML flow completed successfully!")
+    print("\nSUCCESS: XML flow completed successfully!")
 
 
 def main():
@@ -384,10 +384,10 @@ def main():
         print("\n" + "=" * 70)
         print("Summary")
         print("=" * 70)
-        print("\n✓ All data flows completed successfully!")
-        print("✓ PII was redacted at each step")
-        print("✓ Data was validated before persistence")
-        print("✓ Audit trail was maintained")
+        print("\nSUCCESS: All data flows completed successfully!")
+        print("SUCCESS: PII was redacted at each step")
+        print("SUCCESS: Data was validated before persistence")
+        print("SUCCESS: Audit trail was maintained")
         print(f"\nDatabase file: {db_path}")
         print("(Temporary files will be cleaned up)")
 
