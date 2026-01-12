@@ -310,32 +310,43 @@ def generate_csv_file(
     # Generate records in batches to show progress
     batch_size = 10000
     
-    # Open CSV files for writing
-    patients_file = open(patients_path, 'w', newline='', encoding='utf-8')
-    patients_writer = csv.DictWriter(patients_file, fieldnames=patient_columns, delimiter=delimiter)
-    patients_writer.writeheader()
-    
-    if format_type == "flat":
-        encounters_file = open(encounters_path, 'w', newline='', encoding='utf-8')
-        encounters_writer = csv.DictWriter(encounters_file, fieldnames=encounter_columns, delimiter=delimiter)
-        encounters_writer.writeheader()
-        
-        observations_file = open(observations_path, 'w', newline='', encoding='utf-8')
-        observations_writer = csv.DictWriter(observations_file, fieldnames=observation_columns, delimiter=delimiter)
-        observations_writer.writeheader()
-    else:
-        # Denormalized format: combine all columns
-        denormalized_columns = patient_columns + observation_columns[1:]  # Skip observation_id, include patient_id
-        observations_file = open(patients_path, 'w', newline='', encoding='utf-8')  # Use patients_path for denormalized
-        observations_writer = csv.DictWriter(observations_file, fieldnames=denormalized_columns, delimiter=delimiter)
-        observations_writer.writeheader()
-        encounters_file = None
-        encounters_writer = None
-        # Don't write to patients_file for denormalized format
-        patients_file.close()
-        patients_writer = None
+    # Open CSV files for writing with proper exception handling
+    patients_file = None
+    encounters_file = None
+    observations_file = None
+    patients_writer = None
+    encounters_writer = None
+    observations_writer = None
     
     try:
+        # Open CSV files for writing
+        patients_file = open(patients_path, 'w', newline='', encoding='utf-8')
+        patients_writer = csv.DictWriter(patients_file, fieldnames=patient_columns, delimiter=delimiter)
+        patients_writer.writeheader()
+        
+        if format_type == "flat":
+            encounters_file = open(encounters_path, 'w', newline='', encoding='utf-8')
+            encounters_writer = csv.DictWriter(encounters_file, fieldnames=encounter_columns, delimiter=delimiter)
+            encounters_writer.writeheader()
+            
+            observations_file = open(observations_path, 'w', newline='', encoding='utf-8')
+            observations_writer = csv.DictWriter(observations_file, fieldnames=observation_columns, delimiter=delimiter)
+            observations_writer.writeheader()
+        else:
+            # Denormalized format: combine all columns
+            denormalized_columns = patient_columns + observation_columns[1:]  # Skip observation_id, include patient_id
+            # Close patients_file first (not used in denormalized format)
+            patients_file.close()
+            patients_file = None
+            patients_writer = None
+            
+            observations_file = open(patients_path, 'w', newline='', encoding='utf-8')  # Use patients_path for denormalized
+            observations_writer = csv.DictWriter(observations_file, fieldnames=denormalized_columns, delimiter=delimiter)
+            observations_writer.writeheader()
+            encounters_file = None
+            encounters_writer = None
+        
+        # Main processing loop
         for batch_start in range(0, num_records, batch_size):
             batch_end = min(batch_start + batch_size, num_records)
             print(f"Generating records {batch_start:,} to {batch_end:,}...")
@@ -404,12 +415,22 @@ def generate_csv_file(
                         observations_writer.writerow(combined_row)
     
     finally:
-        # Close all files
-        patients_file.close()
-        if encounters_file:
-            encounters_file.close()
-        if observations_file:
-            observations_file.close()
+        # Ensure all files are closed, even if an exception occurs
+        if patients_file is not None:
+            try:
+                patients_file.close()
+            except Exception:
+                pass
+        if encounters_file is not None:
+            try:
+                encounters_file.close()
+            except Exception:
+                pass
+        if observations_file is not None:
+            try:
+                observations_file.close()
+            except Exception:
+                pass
     
     # Calculate totals after all files are written
     total_observations = 0

@@ -9,10 +9,9 @@ Security Impact:
 """
 
 import random
-import string
 from pathlib import Path
 from datetime import datetime, timedelta
-from typing import List, Tuple
+from typing import Tuple
 
 
 # Sample data pools for realistic test data generation

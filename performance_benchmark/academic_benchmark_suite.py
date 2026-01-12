@@ -46,6 +46,7 @@ from generate_bad_data import generate_bad_xml_file, generate_bad_json_file, gen
 # Import ingestion pipeline and utilities
 from src.main import IngestionPipeline, create_storage_adapter
 from src.domain.ports import Result, StoragePort
+from src.infrastructure.redaction_context import redaction_context
 from src.main import (
     ingestion_task,
     processing_task,
@@ -529,7 +530,8 @@ def benchmark_bad_data(
                     storage.flush_redaction_logs(redaction_logs)
                     redaction_logger.clear_logs()
             except Exception:
-                pass
+                logger.error(f"Failed to flush redaction logs: {e}", exc_info=True)
+
     
     # End timing
     end_time = time.time()
@@ -779,8 +781,8 @@ def benchmark_xml_performance(
                 if redaction_logs:
                     storage.flush_redaction_logs(redaction_logs)
                     redaction_logger.clear_logs()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(f"Failed to flush redaction logs: {e}", exc_info=True)
     
     # End timing
     end_time = time.time()
@@ -945,7 +947,6 @@ def benchmark_ingestion(
     try:
         # Use pipeline's redaction context (already set up in initialize)
         # We'll iterate manually but use the pipeline's context
-        from src.infrastructure.redaction_context import redaction_context
         with redaction_context(
             logger=redaction_logger,
             source_adapter=adapter.adapter_name,
