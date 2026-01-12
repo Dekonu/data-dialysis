@@ -405,10 +405,11 @@ def generate_csv_file(
     
     finally:
         # Close all files
-        patients_file.close()
-        if encounters_file:
+        if patients_file and not patients_file.closed:
+            patients_file.close()
+        if encounters_file and not encounters_file.closed:
             encounters_file.close()
-        if observations_file:
+        if observations_file and not observations_file.closed:
             observations_file.close()
     
     # Calculate totals after all files are written
