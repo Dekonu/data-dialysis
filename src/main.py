@@ -376,7 +376,10 @@ class IngestionPipeline:
             adapter_kwargs = {}
             if self.xml_config_path:
                 adapter_kwargs["config_path"] = self.xml_config_path
-            if self.batch_size:
+            
+            # Only pass chunk_size for CSV/JSON adapters (XMLIngester doesn't accept it)
+            source_path = Path(self.source)
+            if source_path.suffix.lower() in ['.csv', '.json'] and self.batch_size:
                 adapter_kwargs["chunk_size"] = self.batch_size
             
             self.adapter = get_adapter(self.source, **adapter_kwargs)

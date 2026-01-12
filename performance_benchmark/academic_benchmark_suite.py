@@ -1403,7 +1403,8 @@ def main():
         "--sizes",
         nargs="+",
         type=float,
-        default=[1, 10, 50, 100, 250, 500],
+        #default=[1, 10, 50, 100, 250, 500],
+        default=[1, 2, 3],
         help="File sizes in MB (default: 1 10 50 100 250 500)"
     )
     parser.add_argument(
