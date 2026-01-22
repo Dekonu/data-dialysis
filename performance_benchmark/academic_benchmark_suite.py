@@ -133,6 +133,9 @@ class BenchmarkMetrics:
     # XML-specific metrics
     xml_streaming_enabled: Optional[bool] = None
     xml_memory_efficiency: Optional[float] = None
+    
+    # Adaptive chunking metrics
+    adaptive_chunking_enabled: Optional[bool] = None
 
 
 def calculate_percentiles(values: List[float], percentiles: List[float] = [50, 95, 99]) -> Dict[float, float]:
@@ -873,7 +876,8 @@ def benchmark_ingestion(
     file_path: Path,
     adapter_type: str,
     batch_size: Optional[int] = None,
-    storage: Optional[StoragePort] = None
+    storage: Optional[StoragePort] = None,
+    enable_adaptive_chunking: bool = False
 ) -> BenchmarkMetrics:
     """Run benchmark for a single file.
     
@@ -922,7 +926,8 @@ def benchmark_ingestion(
         storage=storage if storage else create_storage_adapter(),  # Create storage if not provided
         xml_config_path=xml_config_path,
         batch_size=batch_size,
-        enable_circuit_breaker=False  # Disable circuit breaker for benchmarks to track all results
+        enable_circuit_breaker=False,  # Disable circuit breaker for benchmarks to track all results
+        enable_adaptive_chunking=enable_adaptive_chunking
     )
     
     # Initialize pipeline to get adapter and infrastructure set up
@@ -1166,6 +1171,11 @@ def benchmark_ingestion(
         elif adapter_type == "xml":
             records_processed = int(file_size_bytes / 1050)  # ~1050 bytes per XML record
     
+    # Check if adaptive chunking was enabled (check adapter attribute)
+    adaptive_chunking_used = False
+    if adapter_type in ['csv', 'json'] and hasattr(adapter, 'adaptive_chunking_enabled'):
+        adaptive_chunking_used = adapter.adaptive_chunking_enabled
+    
     return BenchmarkMetrics(
         adapter_type=adapter_type,
         file_size_mb=file_size_mb,
@@ -1204,7 +1214,8 @@ def benchmark_ingestion(
         records_failed=records_failed,
         success_rate=success_rate,
         cpu_usage_percent=(cpu_start + cpu_end) / 2 if cpu_start > 0 else 0,
-        timestamp=datetime.now().isoformat()
+        timestamp=datetime.now().isoformat(),
+        adaptive_chunking_enabled=adaptive_chunking_used
     )
 
 
@@ -1216,7 +1227,8 @@ def run_benchmark_suite(
     include_bad_data: bool = False,
     include_xml_performance: bool = False,
     failure_rates: List[float] = [25, 50, 75, 90],
-    output_dir: Optional[Path] = None
+    output_dir: Optional[Path] = None,
+    enable_adaptive_chunking: bool = False
 ) -> List[BenchmarkMetrics]:
     """Run complete benchmark suite and save results to CSV.
     
@@ -1265,7 +1277,8 @@ def run_benchmark_suite(
                         file_path=file_path,
                         adapter_type=adapter_type,
                         batch_size=batch_size,
-                        storage=storage
+                        storage=storage,
+                        enable_adaptive_chunking=enable_adaptive_chunking
                     )
                     all_results.append(metrics)
                     
@@ -1403,8 +1416,7 @@ def main():
         "--sizes",
         nargs="+",
         type=float,
-        #default=[1, 10, 50, 100, 250, 500],
-        default=[1, 2, 3],
+        default=[1, 10, 50, 100, 250, 500],
         help="File sizes in MB (default: 1 10 50 100 250 500)"
     )
     parser.add_argument(
@@ -1446,17 +1458,31 @@ def main():
     parser.add_argument(
         "--no-storage",
         action="store_true",
-        help="Disable storage adapter (no persistence, no redaction log flushing)"
+        help="Disable storage adapter (no persistence, no redaction log flushing) (default: storage enabled)"
     )
     parser.add_argument(
         "--include-bad-data",
         action="store_true",
-        help="Include bad data scenarios with circuit breaker tracking"
+        default=True,
+        help="Include bad data scenarios with circuit breaker tracking (default: enabled)"
+    )
+    parser.add_argument(
+        "--no-bad-data",
+        action="store_false",
+        dest="include_bad_data",
+        help="Disable bad data scenarios"
     )
     parser.add_argument(
         "--include-xml-performance",
         action="store_true",
-        help="Include XML-specific performance benchmarks (streaming vs non-streaming)"
+        default=True,
+        help="Include XML-specific performance benchmarks (streaming vs non-streaming) (default: enabled)"
+    )
+    parser.add_argument(
+        "--no-xml-performance",
+        action="store_false",
+        dest="include_xml_performance",
+        help="Disable XML performance benchmarks"
     )
     parser.add_argument(
         "--failure-rates",
@@ -1464,6 +1490,18 @@ def main():
         type=float,
         default=[25, 50, 75, 90],
         help="Failure rates for bad data tests (default: 25 50 75 90)"
+    )
+    parser.add_argument(
+        "--enable-adaptive-chunking",
+        action="store_true",
+        default=True,
+        help="Enable adaptive chunking for CSV/JSON adapters (default: enabled)"
+    )
+    parser.add_argument(
+        "--no-adaptive-chunking",
+        action="store_false",
+        dest="enable_adaptive_chunking",
+        help="Disable adaptive chunking for CSV/JSON adapters"
     )
     
     args = parser.parse_args()
@@ -1498,7 +1536,8 @@ def main():
         include_bad_data=args.include_bad_data,
         include_xml_performance=args.include_xml_performance,
         failure_rates=args.failure_rates,
-        output_dir=args.output_dir
+        output_dir=args.output_dir,
+        enable_adaptive_chunking=args.enable_adaptive_chunking
     )
     
     # Print summary

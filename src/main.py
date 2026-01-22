@@ -314,7 +314,8 @@ class IngestionPipeline:
         storage: StoragePort,
         xml_config_path: Optional[str] = None,
         batch_size: Optional[int] = None,
-        enable_circuit_breaker: bool = True
+        enable_circuit_breaker: bool = True,
+        enable_adaptive_chunking: bool = False
     ):
         """Initialize the ingestion pipeline.
         
@@ -324,12 +325,15 @@ class IngestionPipeline:
             xml_config_path: Optional XML configuration file path (for XML sources)
             batch_size: Optional batch size for processing (overrides settings)
             enable_circuit_breaker: Whether to enable circuit breaker for failure detection
+            enable_adaptive_chunking: Whether to enable adaptive chunking for CSV/JSON adapters
+                                    (default: False, uses target_total_rows=0 to disable)
         """
         self.source = source
         self.storage = storage
         self.xml_config_path = xml_config_path
         self.batch_size = batch_size or settings.batch_size
         self.enable_circuit_breaker = enable_circuit_breaker
+        self.enable_adaptive_chunking = enable_adaptive_chunking
         
         # Will be initialized in initialize()
         self.adapter: Optional[Any] = None
@@ -377,13 +381,21 @@ class IngestionPipeline:
             if self.xml_config_path:
                 adapter_kwargs["config_path"] = self.xml_config_path
             
-            # Only pass chunk_size for CSV/JSON adapters (XMLIngester doesn't accept it)
+            # Only pass chunk_size and target_total_rows for CSV/JSON adapters (XMLIngester doesn't accept them)
             source_path = Path(self.source)
-            if source_path.suffix.lower() in ['.csv', '.json'] and self.batch_size:
-                adapter_kwargs["chunk_size"] = self.batch_size
+            if source_path.suffix.lower() in ['.csv', '.json']:
+                if self.batch_size:
+                    adapter_kwargs["chunk_size"] = self.batch_size
+                # Enable adaptive chunking by setting target_total_rows (0 disables it)
+                if self.enable_adaptive_chunking:
+                    adapter_kwargs["target_total_rows"] = 50000  # Default target
+                else:
+                    adapter_kwargs["target_total_rows"] = 0  # Disable adaptive chunking
             
             self.adapter = get_adapter(self.source, **adapter_kwargs)
             logger.info(f"Selected adapter: {self.adapter.__class__.__name__}")
+            if source_path.suffix.lower() in ['.csv', '.json']:
+                logger.info(f"Adaptive chunking: {'enabled' if self.enable_adaptive_chunking else 'disabled'}")
         except Exception as e:
             logger.error(f"Failed to get adapter for source '{self.source}': {str(e)}")
             raise
