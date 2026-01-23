@@ -20,6 +20,7 @@ Academic Value:
 
 import argparse
 import csv
+import gc
 import logging
 import os
 import sys
@@ -166,6 +167,156 @@ def calculate_percentiles(values: List[float], percentiles: List[float] = [50, 9
             result[p] = sorted_values[lower] * (1 - weight) + sorted_values[upper] * weight
     
     return result
+
+
+def cleanup_memory() -> None:
+    """Force garbage collection and clear caches to free memory.
+    
+    This should be called after processing large DataFrames or files
+    to ensure memory is released promptly.
+    """
+    # Force garbage collection
+    gc.collect()
+    
+    # Additional cleanup for pandas if available
+    try:
+        import pandas as pd
+        # Clear pandas options cache (if any)
+        # This is a no-op but ensures we're being thorough
+        pass
+    except ImportError:
+        pass
+
+
+def generate_single_test_file(
+    output_dir: Path,
+    format_type: str,
+    size_mb: float,
+    force_regenerate: bool = False
+) -> Optional[Path]:
+    """Generate a single test file on the fly.
+    
+    Args:
+        output_dir: Directory to store test file
+        format_type: File format (csv, json, xml)
+        size_mb: Target file size in MB
+        force_regenerate: If True, regenerate existing files
+    
+    Returns:
+        Path to generated file, or None if generation failed
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Generate filename
+    if format_type == "csv":
+        file_path = output_dir / f"test_{format_type}_{int(size_mb)}mb_patients.csv"
+        encounters_path = output_dir / f"test_{format_type}_{int(size_mb)}mb_encounters.csv"
+        observations_path = output_dir / f"test_{format_type}_{int(size_mb)}mb_observations.csv"
+    else:
+        file_path = output_dir / f"test_{format_type}_{int(size_mb)}mb.{format_type}"
+        encounters_path = None
+        observations_path = None
+    
+    # Skip if file exists and not forcing regeneration
+    if file_path.exists() and not force_regenerate:
+        logger.debug(f"  Using existing {file_path.name}")
+        return file_path
+    
+    # Clean up old files if regenerating
+    if force_regenerate and file_path.exists():
+        logger.debug(f"  Removing old file: {file_path}")
+        file_path.unlink()
+        if format_type == "csv":
+            for related_file in [encounters_path, observations_path]:
+                if related_file and related_file.exists():
+                    related_file.unlink()
+    
+    logger.info(f"  Generating {size_mb}MB {format_type.upper()} file...")
+    
+    try:
+        if format_type == "xml":
+            actual_size, record_count = generate_xml_file(
+                target_size_mb=size_mb,
+                output_path=file_path
+            )
+            return file_path
+            
+        elif format_type == "json":
+            num_records = estimate_records_for_size(size_mb, format_type)
+            max_iterations = 2
+            for iteration in range(max_iterations):
+                generate_json_file(
+                    output_path=file_path,
+                    num_records=num_records
+                )
+                actual_size_mb = file_path.stat().st_size / (1024 * 1024)
+                size_diff_pct = abs(actual_size_mb - size_mb) / size_mb
+                
+                if size_diff_pct <= 0.2:
+                    break
+                
+                if iteration < max_iterations - 1:
+                    adjustment_factor = size_mb / actual_size_mb
+                    num_records = int(num_records * adjustment_factor)
+                    logger.debug(f"    Size {actual_size_mb:.2f}MB off target, adjusting to {num_records} records")
+            return file_path
+            
+        elif format_type == "csv":
+            base_path = output_dir / f"test_{format_type}_{int(size_mb)}mb"
+            num_records = estimate_records_for_size(size_mb, format_type)
+            generate_csv_file(
+                output_path=base_path,
+                num_records=num_records,
+                format_type="flat"
+            )
+            return base_path.parent / f"{base_path.stem}_patients.csv"
+            
+    except Exception as e:
+        logger.error(f"  Failed to generate {file_path}: {e}")
+        # Clean up partial files on error
+        if file_path.exists():
+            try:
+                file_path.unlink()
+            except Exception:
+                pass
+        if format_type == "csv":
+            for related_file in [encounters_path, observations_path]:
+                if related_file and related_file.exists():
+                    try:
+                        related_file.unlink()
+                    except Exception:
+                        pass
+        return None
+    
+    return file_path if file_path.exists() else None
+
+
+def delete_test_file(file_path: Path, format_type: str) -> None:
+    """Delete a test file and related files (for CSV).
+    
+    Args:
+        file_path: Path to the main test file
+        format_type: File format (csv, json, xml)
+    """
+    try:
+        if file_path.exists():
+            file_path.unlink()
+            logger.debug(f"  Deleted {file_path.name}")
+        
+        # Also delete related CSV files
+        if format_type == "csv":
+            base_name = file_path.stem.replace("_patients", "")
+            parent_dir = file_path.parent
+            for suffix in ["_encounters.csv", "_observations.csv"]:
+                related_file = parent_dir / f"{base_name}{suffix}"
+                if related_file.exists():
+                    try:
+                        related_file.unlink()
+                        logger.debug(f"  Deleted {related_file.name}")
+                    except Exception:
+                        pass
+    except Exception as e:
+        logger.warning(f"  Failed to delete {file_path}: {e}")
 
 
 def estimate_records_for_size(target_size_mb: float, format_type: str) -> int:
@@ -415,9 +566,12 @@ def benchmark_bad_data(
                     # Track processing time: time to handle the batch result
                     batch_processing_start = time.time()
                     
+                    # Track records and explicitly delete DataFrames after counting
+                    df_to_delete = None
                     if isinstance(result.value, tuple):
                         if adapter_type in ["csv", "json"]:
                             df, _ = result.value
+                            df_to_delete = df
                             if hasattr(df, '__len__'):
                                 batch_records = len(df)
                                 records_processed += batch_records
@@ -432,6 +586,7 @@ def benchmark_bad_data(
                             else:
                                 records_failed += 1
                     elif hasattr(result.value, '__len__'):
+                        df_to_delete = result.value
                         batch_records = len(result.value)
                         records_processed += batch_records
                         if result.is_success():
@@ -444,6 +599,13 @@ def benchmark_bad_data(
                             records_successful += 1
                         else:
                             records_failed += 1
+                    
+                    # Explicitly delete DataFrame to free memory immediately
+                    if df_to_delete is not None:
+                        try:
+                            del df_to_delete
+                        except Exception:
+                            pass
                     
                     # If storage is provided, persist the batch (this is part of processing time)
                     if storage and result.is_success():
@@ -520,6 +682,9 @@ def benchmark_bad_data(
                         redaction_logger.clear_logs()
                 except Exception as e:
                     logger.warning(f"Failed to flush redaction logs: {e}")
+            
+            # Force garbage collection after processing
+            cleanup_memory()
     
     except Exception as e:
         logger.error(f"Error during bad data ingestion: {e}", exc_info=True)
@@ -534,7 +699,32 @@ def benchmark_bad_data(
                     redaction_logger.clear_logs()
             except Exception:
                 logger.error(f"Failed to flush redaction logs: {e}", exc_info=True)
-
+        
+        # Force garbage collection even on error
+        cleanup_memory()
+    
+    # Get circuit breaker statistics before cleanup
+    try:
+        cb_stats = circuit_breaker.get_statistics()
+    except (NameError, AttributeError):
+        cb_stats = {'is_open': False, 'failure_rate': 0.0, 'threshold': 0.0, 'total_processed': 0, 'total_failures': 0}
+    
+    # Clean up pipeline and adapter before getting final memory stats
+    try:
+        if 'pipeline' in locals():
+            pipeline.cleanup()
+            del pipeline
+        if 'adapter' in locals():
+            del adapter
+        if 'redaction_logger' in locals():
+            del redaction_logger
+        if 'circuit_breaker' in locals():
+            del circuit_breaker
+    except Exception:
+        pass
+    
+    # Force garbage collection before final memory measurement
+    cleanup_memory()
     
     # End timing
     end_time = time.time()
@@ -550,9 +740,6 @@ def benchmark_bad_data(
     peak_memory_mb = peak / (1024 * 1024)  # Convert to MB
     peak_memory_mb = max(peak_memory_mb, max(memory_samples) if memory_samples else 0)
     avg_memory_mb = mean(memory_samples) if memory_samples else initial_memory
-    
-    # Get circuit breaker statistics
-    cb_stats = circuit_breaker.get_statistics()
     
     # Calculate batch time statistics
     avg_batch_time = mean(batch_times) if batch_times else 0
@@ -772,6 +959,9 @@ def benchmark_xml_performance(
                         redaction_logger.clear_logs()
                 except Exception as e:
                     logger.warning(f"Failed to flush redaction logs: {e}")
+            
+            # Force garbage collection after processing
+            cleanup_memory()
     
     except Exception as e:
         logger.error(f"Error during XML performance ingestion: {e}", exc_info=True)
@@ -786,6 +976,24 @@ def benchmark_xml_performance(
                     redaction_logger.clear_logs()
             except Exception as e:
                 logger.error(f"Failed to flush redaction logs: {e}", exc_info=True)
+        
+        # Force garbage collection even on error
+        cleanup_memory()
+    
+    # Clean up pipeline and adapter before getting final memory stats
+    try:
+        if 'pipeline' in locals():
+            pipeline.cleanup()
+            del pipeline
+        if 'adapter' in locals():
+            del adapter
+        if 'redaction_logger' in locals():
+            del redaction_logger
+    except Exception:
+        pass
+    
+    # Force garbage collection before final memory measurement
+    cleanup_memory()
     
     # End timing
     end_time = time.time()
@@ -977,10 +1185,16 @@ def benchmark_ingestion(
                     timing_context=task_timing
                 )
                 
+                # Track records and prepare for cleanup
+                df_to_delete = None
+                raw_df_to_delete = None
+                
                 if isinstance(processed_data, tuple):
                     # Handle tuple returns (redacted_df, raw_df) for raw vault
                     if adapter_type in ["csv", "json"]:
                         df, raw_df = processed_data
+                        df_to_delete = df
+                        raw_df_to_delete = raw_df
                         if hasattr(df, '__len__'):
                             batch_records = len(df)
                             records_processed += batch_records
@@ -997,6 +1211,7 @@ def benchmark_ingestion(
                             records_failed += 1
                 elif hasattr(processed_data, '__len__'):
                     # DataFrame result
+                    df_to_delete = processed_data
                     batch_records = len(processed_data)
                     records_processed += batch_records
                     if processed_result.is_success():
@@ -1092,6 +1307,18 @@ def benchmark_ingestion(
                                 if persist_result and not persist_result.is_success():
                                     logger.warning(f"Failed to persist {table_name} batch: {persist_result.error}")
                 
+                # Explicitly delete DataFrames to free memory immediately after processing
+                if df_to_delete is not None:
+                    try:
+                        del df_to_delete
+                    except Exception:
+                        pass
+                if raw_df_to_delete is not None:
+                    try:
+                        del raw_df_to_delete
+                    except Exception:
+                        pass
+                
                 batch_processing_end = time.time()
                 batch_upload_time = batch_processing_start - batch_upload_start
                 batch_upload_times.append(batch_upload_time)
@@ -1103,11 +1330,18 @@ def benchmark_ingestion(
                 batch_times.append(batch_total_time)
                 
                 num_batches += 1
+                
+                # Periodic garbage collection every 50 batches to prevent memory buildup
+                if num_batches % 50 == 0:
+                    cleanup_memory()
             
             # Flush redaction logs if storage is available (after all records processed)
             # Use pipeline's cleanup method which handles log flushing
             if storage:
                 pipeline.cleanup()
+            
+            # Force garbage collection after all processing
+            cleanup_memory()
     
     except Exception as e:
         logger.error(f"Error during ingestion: {e}", exc_info=True)
@@ -1118,6 +1352,26 @@ def benchmark_ingestion(
             pipeline.cleanup()
         except Exception:
             pass  # Ignore errors during error handling
+        
+        # Force garbage collection even on error
+        cleanup_memory()
+    
+    # Clean up pipeline and adapter before getting final memory stats
+    try:
+        if 'pipeline' in locals():
+            pipeline.cleanup()
+            del pipeline
+        if 'adapter' in locals():
+            del adapter
+        if 'redaction_logger' in locals():
+            del redaction_logger
+        if 'task_timing' in locals():
+            del task_timing
+    except Exception:
+        pass
+    
+    # Force garbage collection before final memory measurement
+    cleanup_memory()
     
     # End timing
     end_time = time.time()
@@ -1228,7 +1482,8 @@ def run_benchmark_suite(
     include_xml_performance: bool = False,
     failure_rates: List[float] = [25, 50, 75, 90],
     output_dir: Optional[Path] = None,
-    enable_adaptive_chunking: bool = False
+    enable_adaptive_chunking: bool = False,
+    generate_on_fly: bool = True
 ) -> List[BenchmarkMetrics]:
     """Run complete benchmark suite and save results to CSV.
     
@@ -1267,14 +1522,35 @@ def run_benchmark_suite(
         logger.info(f"{'=' * 80}")
         
         for size_mb, file_path in sorted(size_files.items()):
-            if not file_path.exists():
-                logger.warning(f"  File not found: {file_path}, skipping...")
+            # Generate file on the fly if needed
+            actual_file_path = file_path
+            file_generated = False
+            
+            if generate_on_fly:
+                # Generate file just before benchmarking
+                if not file_path.exists() or not file_path.stat().st_size:
+                    logger.info(f"  Generating {size_mb}MB {adapter_type.upper()} file on the fly...")
+                    actual_file_path = generate_single_test_file(
+                        output_dir=output_dir if output_dir else file_path.parent,
+                        format_type=adapter_type,
+                        size_mb=size_mb,
+                        force_regenerate=False
+                    )
+                    if actual_file_path is None:
+                        logger.warning(f"  Failed to generate file for {size_mb}MB {adapter_type}, skipping...")
+                        continue
+                    file_generated = True
+                else:
+                    actual_file_path = file_path
+            
+            if not actual_file_path or not actual_file_path.exists():
+                logger.warning(f"  File not found: {actual_file_path}, skipping...")
                 continue
             
             for batch_size in batch_sizes:
                 try:
                     metrics = benchmark_ingestion(
-                        file_path=file_path,
+                        file_path=actual_file_path,
                         adapter_type=adapter_type,
                         batch_size=batch_size,
                         storage=storage,
@@ -1286,9 +1562,21 @@ def run_benchmark_suite(
                                 f"{metrics.peak_memory_mb:.1f}MB peak, "
                                 f"{metrics.total_time_seconds:.2f}s")
                     
+                    # Force garbage collection after each benchmark
+                    cleanup_memory()
+                    
                 except Exception as e:
-                    logger.error(f"  FAILED to benchmark {file_path}: {e}")
+                    logger.error(f"  FAILED to benchmark {actual_file_path}: {e}")
+                    cleanup_memory()  # Clean up even on error
                     continue
+            
+            # Delete file immediately after benchmarking if generated on the fly
+            if generate_on_fly and file_generated and actual_file_path:
+                try:
+                    delete_test_file(actual_file_path, adapter_type)
+                    cleanup_memory()  # Force GC after file deletion
+                except Exception as e:
+                    logger.warning(f"  Failed to delete {actual_file_path}: {e}")
     
     # Run bad data benchmarks
     if include_bad_data:
@@ -1302,34 +1590,36 @@ def run_benchmark_suite(
         
         for adapter_type in ["csv", "json", "xml"]:
             for failure_rate in failure_rates:
-                # Generate bad data file if it doesn't exist (reuse existing files)
+                # Generate bad data file
                 if adapter_type == "xml":
                     bad_file = bad_data_dir / f"bad_xml_{int(failure_rate)}pct.xml"
-                    if not bad_file.exists():
-                        logger.info(f"  Generating {bad_file.name}...")
+                elif adapter_type == "json":
+                    bad_file = bad_data_dir / f"bad_json_{int(failure_rate)}pct.json"
+                else:  # csv
+                    bad_file = bad_data_dir / f"bad_csv_{int(failure_rate)}pct.csv"
+                
+                # Generate on the fly if needed (or if generate_on_fly is enabled)
+                if generate_on_fly or not bad_file.exists():
+                    logger.info(f"  Generating {bad_file.name}...")
+                    if adapter_type == "xml":
                         generate_bad_xml_file(
                             output_path=bad_file,
                             num_records=1000,  # Use smaller files for bad data tests
                             failure_rate_percent=failure_rate
                         )
-                elif adapter_type == "json":
-                    bad_file = bad_data_dir / f"bad_json_{int(failure_rate)}pct.json"
-                    if not bad_file.exists():
-                        logger.info(f"  Generating {bad_file.name}...")
+                    elif adapter_type == "json":
                         generate_bad_json_file(
                             output_path=bad_file,
                             num_records=1000,
                             failure_rate_percent=failure_rate
                         )
-                else:  # csv
-                    bad_file = bad_data_dir / f"bad_csv_{int(failure_rate)}pct.csv"
-                    if not bad_file.exists():
-                        logger.info(f"  Generating {bad_file.name}...")
+                    else:  # csv
                         generate_bad_csv_file( 
                             output_path=bad_file,
                             num_records=1000,
                             failure_rate_percent=failure_rate
                         )
+                    cleanup_memory()  # Clean up after generation
                 
                 if bad_file.exists():
                     try:
@@ -1348,8 +1638,20 @@ def run_benchmark_suite(
                                   f"failure_rate={metrics.circuit_breaker_failure_rate:.1f}%, "
                                   f"{metrics.records_per_second:.0f} rec/s")
                         
+                        # Force garbage collection after each benchmark
+                        cleanup_memory()
+                        
+                        # Delete bad data file if generated on the fly
+                        if generate_on_fly:
+                            try:
+                                delete_test_file(bad_file, adapter_type)
+                                cleanup_memory()
+                            except Exception as e:
+                                logger.warning(f"  Failed to delete {bad_file}: {e}")
+                        
                     except Exception as e:
                         logger.error(f"  FAILED to benchmark bad data {bad_file}: {e}")
+                        cleanup_memory()  # Clean up even on error
                         continue
     
     # Run XML performance benchmarks (streaming vs non-streaming)
@@ -1379,8 +1681,12 @@ def run_benchmark_suite(
                               f"{metrics.peak_memory_mb:.1f}MB peak, "
                               f"{metrics.total_time_seconds:.2f}s")
                     
+                    # Force garbage collection after each benchmark
+                    cleanup_memory()
+                    
                 except Exception as e:
                     logger.error(f"  FAILED to benchmark XML performance {file_path}: {e}")
+                    cleanup_memory()  # Clean up even on error
                     continue
     
     # Write results to CSV
@@ -1503,6 +1809,18 @@ def main():
         dest="enable_adaptive_chunking",
         help="Disable adaptive chunking for CSV/JSON adapters"
     )
+    parser.add_argument(
+        "--generate-on-fly",
+        action="store_true",
+        default=True,
+        help="Generate and delete test files on the fly to preserve memory (default: enabled)"
+    )
+    parser.add_argument(
+        "--no-generate-on-fly",
+        action="store_false",
+        dest="generate_on_fly",
+        help="Disable on-the-fly generation (keep all files in memory/on disk)"
+    )
     
     args = parser.parse_args()
     
@@ -1537,8 +1855,12 @@ def main():
         include_xml_performance=args.include_xml_performance,
         failure_rates=args.failure_rates,
         output_dir=args.output_dir,
-        enable_adaptive_chunking=args.enable_adaptive_chunking
+        enable_adaptive_chunking=args.enable_adaptive_chunking,
+        generate_on_fly=args.generate_on_fly
     )
+    
+    # Final cleanup
+    cleanup_memory()
     
     # Print summary
     logger.info(f"\n{'=' * 80}")
