@@ -2,7 +2,7 @@
 
 <div align="center">
 
-**A production-ready, security-first data pipeline for ingesting clinical and sensitive data with automatic PII redaction, schema validation, and threat protection.**
+**A production-ready, security-first data pipeline for ingesting clinical and sensitive data with automatic PII redaction, schema validation, and real-time observability.**
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -12,35 +12,44 @@
 
 ---
 
+## About This Project
+
+Data-Dialysis is a **portfolio project** demonstrating production-grade software engineering: Hexagonal Architecture, security-first design (HIPAA/GDPR), streaming data pipelines, and a full-stack observability dashboard. It showcases current industry practices and technologies—Pydantic V2, FastAPI, Next.js App Router, TypeScript, DuckDB, WebSockets—applied to a realistic clinical data ingestion problem with PII redaction, change data capture, and circuit breakers.
+
+---
+
 ## Abstract
 
-Data-Dialysis is a **production-grade data ingestion system** implementing Hexagonal Architecture principles to process clinical and sensitive datasets with automatic PII (Personally Identifiable Information) redaction, schema validation, and comprehensive threat protection. The system demonstrates advanced software engineering practices including:
+Data-Dialysis is a **production-grade data ingestion system** that implements Hexagonal (Ports & Adapters) architecture to process clinical and sensitive datasets with automatic PII redaction, schema validation, and comprehensive threat protection. Highlights:
 
-- **Security-First Architecture**: Multi-layer defense mechanisms against XML attacks, injection, and resource exhaustion
-- **Scalable Processing**: Streaming architecture enabling O(record_size) memory usage for files of arbitrary size (validated with 100MB+ files)
-- **Change Data Capture**: Field-level change tracking with encrypted raw data vault for accurate audit trails
-- **Compliance-Ready**: HIPAA/GDPR compliant with immutable audit logs and encrypted PII storage
+- **Security-first design**: Multi-layer defense (defusedxml, streaming, validation, circuit breakers) against XML attacks, injection, and resource exhaustion
+- **Scalable processing**: Streaming architecture with O(record_size) memory usage—validated with 100MB+ files and a full benchmarking suite
+- **Change Data Capture**: Field-level change tracking with encrypted raw data vault for audit trails
+- **Real-time dashboard**: FastAPI backend + Next.js 16 frontend with WebSocket-driven metrics, audit logs, and security views
+- **Quantified performance**: Academic-style benchmark suite (CSV/JSON/XML, multiple sizes) with automated visualizations (throughput, memory, latency, format comparison)
 
-**Key Technical Achievement:** Processes **100MB+ XML files** with constant memory usage (~50-100MB peak) using streaming architecture, demonstrating production-ready scalability and efficient resource utilization.
+**Key technical achievements:**
+- Processes **100MB+ XML files** with constant memory (~50–100MB peak) via streaming
+- **Verify-then-load** pipeline: data cannot reach persistence without passing validation and redaction
+- **Benchmark suite** with throughput, memory profiling, batch statistics, and publication-quality charts
 
-**Key Features:**
-- 🔒 **Automatic PII Redaction** - HIPAA/GDPR compliant with audit trails
-- 🛡️ **Security-First Architecture** - Protection against XML attacks, injection, and resource exhaustion
-- 🏗️ **Hexagonal Architecture** - Clean separation of concerns, highly testable
-- ⚡ **High Performance** - Streaming processing for large files (handles 100MB+ files efficiently)
-- 📊 **Scalable Processing** - O(record_size) memory usage with streaming, not O(file_size)
-- ✅ **Strict Validation** - Pydantic V2 schemas with fail-fast error handling
-- 🔄 **Circuit Breaker** - Automatic quality gates to prevent bad data ingestion
+---
 
 ## 🚀 Quick Start
 
 ### Installation
 
 ```bash
+# Clone and enter project
+cd DataDialysis
+
+# Create virtual environment (recommended)
+python -m venv .venv
+.venv\Scripts\activate   # Windows
+# source .venv/bin/activate  # Linux/macOS
+
 # Install dependencies
 pip install -r requirements.txt
-
-# Install CLI (optional, for development)
 pip install -e .
 ```
 
@@ -50,359 +59,223 @@ pip install -e .
 # Ingest a CSV file
 datadialysis ingest data/patients.csv
 
-# Ingest an XML file (requires config)
+# Ingest XML (requires config)
 datadialysis ingest data/encounters.xml --xml-config xml_config.json
 
 # Ingest with custom batch size
 datadialysis ingest data/observations.json --batch-size 5000
 
-# View system information
-datadialysis info
-
 # Run performance benchmarks
 datadialysis benchmark test_data/ xml_config.json
+
+# Start dashboard (backend + frontend via Docker, or run separately)
+docker-compose up -d
 ```
 
 ---
 
-## 🛡️ Threat Model & Security
+## 🛠️ Tech Stack (Current Technologies)
 
-**This system is designed to process data from untrusted sources while maintaining HIPAA/GDPR compliance.**
-
-See **[THREAT_MODEL.md](THREAT_MODEL.md)** for comprehensive documentation of:
-- **Attack vectors** (XML attacks, PII leakage, injection, resource exhaustion)
-- **Defense mechanisms** (defusedxml, streaming, validation, circuit breakers)
-- **Security layers** (defense in depth architecture)
-- **Compliance** (HIPAA, GDPR audit trails)
-
-### Key Security Features
-
-✅ **XML Attack Prevention**
-- Billion Laughs attack protection via `defusedxml`
-- Quadratic blowup prevention with streaming parser
-- XXE (XML External Entity) attack blocking
-
-✅ **PII Redaction**
-- Automatic detection and redaction of SSNs, phone numbers, emails
-- Name entity recognition in unstructured text
-- Irreversible redaction with audit trail
-
-✅ **Data Poisoning Protection**
-- Strict Pydantic schema validation
-- Circuit breaker halts ingestion if error rate >10%
-- SQL/XSS injection prevention via parameterized queries
-
-✅ **Resource Exhaustion Protection**
-- Streaming processing for large files (O(record_size) memory)
-- Record size limits (default: 10MB per record)
-- Event/depth limits prevent CPU exhaustion
+| Layer | Technologies |
+|-------|--------------|
+| **Language & validation** | Python 3.11+, **Pydantic V2** (strict schemas, field validators) |
+| **API & async** | **FastAPI**, async/await, lifespan, dependency injection |
+| **Data processing** | **Pandas** (vectorized), streaming parsers, chunked I/O |
+| **Databases** | **DuckDB** (analytical), **PostgreSQL** + **SQLAlchemy 2.0** |
+| **XML security** | **defusedxml**, lxml (streaming) |
+| **CLI** | **Typer**, **Rich** (type-safe, modern CLI) |
+| **Dashboard backend** | FastAPI, **WebSockets**, Pydantic response models |
+| **Dashboard frontend** | **Next.js 16** (App Router), **React 19**, **TypeScript**, **Tailwind CSS**, **Radix UI**, **Recharts** |
+| **Testing** | **pytest**, **pytest-asyncio**, **Hypothesis** (property-based) |
+| **Benchmarking** | **tracemalloc**, **psutil**, **Matplotlib**, **Seaborn** (visualizations) |
+| **Security** | **cryptography**, NER (e.g. spaCy) for PII in free text |
 
 ---
 
 ## 🏗️ Architecture
 
-### Hexagonal (Ports & Adapters) Architecture
+### Hexagonal (Ports & Adapters)
 
-This engine uses **Hexagonal Architecture** to decouple business logic from infrastructure:
+Business logic lives in the **domain core**; infrastructure (ingestion, storage, API) is behind **ports** and swappable **adapters**.
 
 ```
 ┌─────────────────────────────────────────┐
 │         Domain Core (Pure Python)       │
-│  - GoldenRecord (Pydantic schemas)     │
-│  - RedactorService (PII redaction)      │
-│  - CircuitBreaker (Quality gates)      │
+│  GoldenRecord (Pydantic), Redactor,     │
+│  CircuitBreaker, Change Detector         │
 └─────────────────────────────────────────┘
-           ↕ Ports (Interfaces)
+           ↕ Ports (protocols)
 ┌─────────────────────────────────────────┐
 │      Adapters (Infrastructure)          │
-│  - CSV/JSON/XML Ingestion Adapters     │
-│  - DuckDB/PostgreSQL Storage Adapters  │
+│  CSV/JSON/XML ingesters • DuckDB/       │
+│  PostgreSQL • FastAPI dashboard API     │
 └─────────────────────────────────────────┘
 ```
 
-**Benefits:**
-- **Testability:** Core logic can be unit-tested without databases
-- **Flexibility:** Swap adapters without changing business logic
-- **Security:** Safety layer is isolated and cannot be bypassed
+**Benefits:** Testable core without DBs, pluggable adapters, clear security boundary.
+
+### Verify-Then-Load Data Flow
+
+```
+Input (CSV/JSON/XML) → Secure parsing → PII redaction → Schema validation (Pydantic)
+    → Circuit breaker check → Persistence (parameterized, transactional) → DB
+```
+
+Data cannot reach the database without passing validation and redaction.
 
 ---
 
-## 📋 Data Flow
+## 🛡️ Security & Threat Model
 
-### Verify-Then-Load Pattern
+The system is designed to process **untrusted input** while supporting HIPAA/GDPR expectations. See **[THREAT_MODEL.md](THREAT_MODEL.md)** for attack vectors and defenses.
 
-Unlike traditional ELT pipelines, Data-Dialysis follows a **Verify-Then-Load** pattern:
-
-```
-Input File (CSV/JSON/XML)
-    ↓
-[1] Secure Parsing
-    - defusedxml for XML
-    - Streaming for large files
-    - Event/depth limits
-    ↓
-[2] PII Redaction
-    - Regex-based detection
-    - Field-level validation
-    - Unstructured text scanning
-    ↓
-[3] Schema Validation
-    - Pydantic strict validation
-    - Type coercion
-    - Pattern matching
-    ↓
-[4] Circuit Breaker Check
-    - Failure rate monitoring
-    - Auto-halt on threshold
-    ↓
-[5] Secure Persistence
-    - Parameterized queries
-    - Transaction safety
-    - Audit logging
-    ↓
-Database (DuckDB/PostgreSQL)
-```
-
-**Security Boundary:** The Safety Layer (steps 2-3) is the **hard security boundary**. Data cannot reach the database without passing through validation and redaction.
+- **XML**: defusedxml (Billion Laughs, XXE), streaming to limit memory and CPU blowup  
+- **PII**: Regex + NER redaction, irreversible with audit trail  
+- **Data quality**: Strict Pydantic validation; **circuit breaker** stops ingestion if failure rate exceeds threshold  
+- **Persistence**: Parameterized queries, transaction safety, audit logging  
 
 ---
 
-## 🛠️ Tech Stack
+## 📊 Performance & Benchmarking
 
-- **Language:** Python 3.11+
-- **Validation:** Pydantic V2 (strict schema enforcement)
-- **Data Processing:** Pandas (vectorized operations)
-- **XML Security:** defusedxml + lxml (streaming)
-- **Database:** DuckDB (analytical) / PostgreSQL (production)
-- **CLI:** Typer + Rich (modern, type-safe CLI)
-- **Testing:** pytest + hypothesis (property-based testing)
+### Benchmark Suite
+
+The **`performance_benchmark/`** suite provides repeatable, multi-format evaluation:
+
+- **Scripts**: `academic_benchmark_suite.py` (orchestrates runs), `visualize_benchmark_results.py` (charts from CSV)
+- **Formats**: CSV, JSON, XML (configurable sizes, e.g. 1MB–100MB+)
+- **Metrics**: Throughput (records/s, MB/s), peak/avg memory, processing/upload/ingestion times, batch stats, success rate
+- **Output**: `benchmark_results.csv` plus `benchmark_visualizations/` (throughput vs size, memory efficiency, format comparison, scalability, heatmaps, etc.)
+
+```bash
+# From project root (with test data and xml_config.json in place)
+python performance_benchmark/academic_benchmark_suite.py test_data/ xml_config.json --output benchmark_results.csv
+
+# Generate visualizations from existing results
+python performance_benchmark/visualize_benchmark_results.py benchmark_results.csv --output-dir benchmark_visualizations
+```
+
+**See [docs/PERFORMANCE_BENCHMARKING.md](docs/PERFORMANCE_BENCHMARKING.md)** for methodology and interpretation.
+
+### Scalability
+
+- **Streaming XML**: O(record_size) memory; 100MB+ files at ~50–100MB peak RAM  
+- **Batch tuning**: Configurable batch sizes; benchmark suite includes batch-size and format comparison  
+
+---
+
+## 📺 Real-Time Dashboard
+
+The **dashboard** gives operational visibility over the pipeline:
+
+- **Backend**: FastAPI app in `src/dashboard/api/` — REST endpoints for metrics, audit log, change history, circuit breaker status; **WebSockets** for live updates  
+- **Frontend**: **Next.js 16** (App Router), **React 19**, **TypeScript**, **Tailwind**, **Radix UI**, **Recharts** in `dashboard-frontend/`  
+- **Views**: Overview, performance, security metrics, audit log, change history, circuit breaker status  
+
+Run with **Docker** (`docker-compose up`) or run backend and frontend separately (see [docs/DASHBOARD_DESIGN.md](docs/DASHBOARD_DESIGN.md)).
 
 ---
 
 ## 📖 Documentation
 
-### Core Documentation
-
-- **[ARCHITECTURE.md](ARCHITECTURE.md)** - Comprehensive architecture overview, design patterns, and system structure
-- **[THREAT_MODEL.md](THREAT_MODEL.md)** - Detailed threat model, attack vectors, and defense mechanisms
-- **[docs/PERFORMANCE_BENCHMARKING.md](docs/PERFORMANCE_BENCHMARKING.md)** - Performance evaluation methodology and results
-- **[docs/README.md](docs/README.md)** - Detailed design documents and technical specifications
-
-### Design Documents
-
-- **[docs/XML_STREAMING_DESIGN.md](docs/XML_STREAMING_DESIGN.md)** - Streaming architecture for large file processing
-- **[docs/REDACTION_LOGGING.md](docs/REDACTION_LOGGING.md)** - PII redaction system and audit trail architecture
-- **[docs/CHANGE_DATA_CAPTURE_PLAN.md](docs/CHANGE_DATA_CAPTURE_PLAN.md)** - CDC implementation with field-level change tracking
-- **[docs/RAW_DATA_VAULT_DESIGN.md](docs/RAW_DATA_VAULT_DESIGN.md)** - Encrypted raw data storage for accurate change detection
-- **[docs/DASHBOARD_DESIGN.md](docs/DASHBOARD_DESIGN.md)** - Real-time monitoring dashboard architecture
+| Document | Description |
+|----------|-------------|
+| [ARCHITECTURE.md](ARCHITECTURE.md) | Layers, ports, adapters, design rationale |
+| [THREAT_MODEL.md](THREAT_MODEL.md) | Threat model, defenses, compliance notes |
+| [docs/PERFORMANCE_BENCHMARKING.md](docs/PERFORMANCE_BENCHMARKING.md) | Benchmark methodology and metrics |
+| [docs/README.md](docs/README.md) | Design docs index |
+| [docs/XML_STREAMING_DESIGN.md](docs/XML_STREAMING_DESIGN.md) | Streaming XML parser design |
+| [docs/REDACTION_LOGGING.md](docs/REDACTION_LOGGING.md) | PII redaction and audit trail |
+| [docs/CHANGE_DATA_CAPTURE_PLAN.md](docs/CHANGE_DATA_CAPTURE_PLAN.md) | CDC and field-level change tracking |
+| [docs/DASHBOARD_DESIGN.md](docs/DASHBOARD_DESIGN.md) | Dashboard architecture and APIs |
 
 ---
 
 ## 🔧 Configuration
 
-### Environment Variables
+Key environment variables (see `.env.example` or inline below):
 
 ```bash
-# Database Configuration
-export DD_DB_TYPE=duckdb                    # or postgresql
-export DD_DB_PATH=./data/clinical.db        # DuckDB path
-export DD_DB_HOST=localhost                  # PostgreSQL host
-export DD_DB_NAME=clinical_db               # PostgreSQL database
+# Database
+DD_DB_TYPE=duckdb
+DD_DB_PATH=./data/clinical.db
 
-# Processing Configuration
-export DD_BATCH_SIZE=1000                   # Batch size for processing
-export DD_CHUNK_SIZE=5000                   # Chunk size for CSV/JSON
-export DD_MAX_RECORD_SIZE=10485760          # Max record size (10MB)
+# Processing
+DD_BATCH_SIZE=1000
+DD_XML_STREAMING_ENABLED=true
+DD_XML_STREAMING_THRESHOLD=104857600   # 100MB
 
-# Security Configuration
-export DD_CIRCUIT_BREAKER_ENABLED=true      # Enable circuit breaker
-export DD_CIRCUIT_BREAKER_THRESHOLD=0.1     # 10% failure threshold
-export DD_XML_STREAMING_ENABLED=true        # Enable XML streaming
-export DD_XML_STREAMING_THRESHOLD=104857600 # 100MB threshold
-
-# Logging
-export DD_LOG_LEVEL=INFO                    # DEBUG, INFO, WARNING, ERROR
-export DD_SAVE_SECURITY_REPORT=true         # Save security reports
+# Safety
+DD_CIRCUIT_BREAKER_ENABLED=true
+DD_CIRCUIT_BREAKER_THRESHOLD=0.1
+DD_LOG_LEVEL=INFO
 ```
 
-### XML Configuration
-
-For XML ingestion, create a JSON configuration file mapping XPath expressions to fields:
-
-```json
-{
-  "root_element": "./PatientRecord",
-  "fields": {
-    "mrn": "./MRN",
-    "patient_name": "./Demographics/FullName",
-    "patient_dob": "./Demographics/BirthDate",
-    "patient_gender": "./Demographics/Gender",
-    "ssn": "./Demographics/SSN",
-    "phone": "./Demographics/Phone",
-    "email": "./Demographics/Email",
-    "address_line1": "./Demographics/Address/Street",
-    "city": "./Demographics/Address/City",
-    "state": "./Demographics/Address/State",
-    "postal_code": "./Demographics/Address/ZIP"
-  }
-}
-```
-
----
-
-## 📊 Performance & Scalability
-
-### Large File Processing Capability
-
-The system efficiently processes files up to 100MB+ using streaming architecture, demonstrating production-ready scalability:
-
-- ✅ **100MB XML files** processed with constant memory usage (~50-100MB peak)
-- ✅ **Streaming parser** prevents memory exhaustion on large datasets
-- ✅ **Automatic mode selection** - uses streaming for files >100MB
-- ✅ **O(record_size) memory complexity** - not O(file_size) - scales to any file size
-
-This capability demonstrates advanced data pipeline engineering, handling real-world clinical data volumes without resource exhaustion.
-
-### Performance Benchmarking
-
-A comprehensive benchmarking suite provides quantitative performance evaluation:
-
-```bash
-# Generate test XML files (1MB, 5MB, 10MB, 25MB, 50MB, 75MB, 100MB)
-python scripts/generate_xml_test_files.py
-
-# Run comprehensive benchmarks
-python scripts/benchmark_xml_ingestion.py test_data/ xml_config.json --iterations 3
-
-# Or use CLI
-datadialysis benchmark test_data/ xml_config.json --iterations 3
-```
-
-**See [docs/PERFORMANCE_BENCHMARKING.md](docs/PERFORMANCE_BENCHMARKING.md) for detailed methodology and results.**
-
-### Performance Characteristics
-
-- **Small files (<10MB):** Traditional mode, ~2,000-5,000 records/sec
-- **Large files (100MB+):** Streaming mode, ~1,400-1,800 records/sec
-- **Memory usage:** O(record_size) with streaming, not O(file_size)
-- **100MB file processing:** Constant memory (~50-100MB peak) regardless of file size
-- **Change Data Capture:** <10% overhead on ingestion throughput
+XML ingestion uses a JSON config for XPath → field mapping; see **`xml_config.json`** in the repo for the structure (`root_element`, `fields` with XPath values).
 
 ---
 
 ## 🧪 Testing
 
 ```bash
-# Run all tests
 pytest
-
-# Run with coverage
 pytest --cov=src --cov-report=html
-
-# Run specific test suite
-pytest tests/test_xml_ingestion.py -v
+pytest tests/integration/ -v
 ```
 
-**Test Coverage:**
-- ✅ 170+ tests covering ingestion, validation, redaction, and CDC
-- ✅ Adversarial tests for security (XML attacks, injection attempts)
-- ✅ Property-based tests with Hypothesis
-- ✅ Integration tests with DuckDB and PostgreSQL
-- ✅ Unit tests for all adapters and domain services
+- **Unit**: Domain, adapters, infrastructure  
+- **Integration**: CSV/JSON/XML ingestion, DuckDB/PostgreSQL, security (bad data, circuit breaker)  
+- **Adversarial**: Malformed XML, injection attempts, schema violations  
+- **Property-based**: Hypothesis where applicable  
 
 ---
 
 ## 📝 Examples
 
-### Example 1: Ingest CSV File
+**CLI:**
 
 ```bash
 datadialysis ingest data/patients.csv
+datadialysis ingest data/encounters.xml --xml-config xml_config.json --batch-size 2000
+datadialysis info
 ```
 
-### Example 2: Ingest XML with Custom Config
-
-```bash
-datadialysis ingest data/encounters.xml \
-    --xml-config custom_mappings.json \
-    --batch-size 2000 \
-    --verbose
-```
-
-### Example 3: Programmatic Usage
+**Programmatic:**
 
 ```python
 from src.adapters.ingesters import get_adapter
-from src.adapters.storage import DuckDBAdapter
 
-# Get ingestion adapter
 adapter = get_adapter("data/patients.csv")
-
-# Process records
 for result in adapter.ingest("data/patients.csv"):
     if result.is_success():
-        print(f"Processed: {result.value.patient.patient_id}")
+        print(result.value.patient.patient_id)
     else:
-        print(f"Failed: {result.error}")
+        print(result.error)
 ```
-
----
-
-## 🔒 Security Architecture
-
-The system implements **defense-in-depth** security with multiple protection layers:
-
-1. **Input Sanitization** - File size limits, format validation, malformed data rejection
-2. **Secure Parsing** - defusedxml for XML attacks, streaming for memory safety
-3. **PII Redaction** - Automatic detection and redaction with audit trails
-4. **Schema Validation** - Strict Pydantic validation with fail-fast error handling
-5. **Circuit Breaker** - Quality gates prevent bad data ingestion
-6. **Secure Persistence** - Parameterized queries, transaction safety, audit logging
-
-**See [THREAT_MODEL.md](THREAT_MODEL.md) for comprehensive security analysis.**
 
 ---
 
 ## 🤝 Contributing
 
-We welcome contributions! This is a security-critical system, so please review our [Contributing Guidelines](CONTRIBUTING.md) before submitting PRs.
-
-**Key Requirements:**
-- Include tests (especially adversarial tests)
-- Document security impact
-- Follow Hexagonal Architecture principles
-- Maintain backward compatibility
-- Update documentation for new features
+See [CONTRIBUTING.md](CONTRIBUTING.md). Contributions should include tests (including adversarial cases where relevant), preserve Hexagonal boundaries, and document security impact where applicable.
 
 ---
 
 ## 📄 License
 
-See [LICENSE](LICENSE) file for details.
+See [LICENSE](LICENSE).
 
 ---
 
-## 🙏 Acknowledgments
+## Portfolio & Skills Demonstrated
 
-- **defusedxml** - XML attack prevention
-- **Pydantic** - Schema validation
-- **DuckDB** - High-performance analytical database
-- **Typer** - Modern CLI framework
+This project illustrates practices and technologies relevant to **mid- to senior-level** roles in data engineering, backend services, and platform/security-aware applications:
 
----
+- **Architecture**: Hexagonal/ports-and-adapters, clear boundaries, testability  
+- **Security**: Threat-aware design, PII handling, secure parsing, circuit breakers, audit trails  
+- **Data engineering**: Streaming pipelines, CDC, multi-format ingestion, benchmarking  
+- **Modern Python**: 3.11+, Pydantic V2, async FastAPI, type hints  
+- **Full-stack**: FastAPI + Next.js, TypeScript, REST + WebSockets  
+- **Quality**: pytest, Hypothesis, benchmark suite, reproducible visualizations  
 
----
-
-## Research & Academic Context
-
-This project demonstrates advanced software engineering practices suitable for graduate-level computer science programs:
-
-- **Architectural Patterns**: Hexagonal Architecture (Ports & Adapters) for maintainability and testability
-- **Security Engineering**: Multi-layer threat protection with formal threat modeling
-- **Performance Engineering**: Streaming algorithms achieving O(record_size) memory complexity
-- **Data Engineering**: Change Data Capture with encrypted raw data vault for compliance
-- **Software Quality**: Comprehensive testing (170+ tests) including adversarial security tests
-
-**Version:** 1.0.0 | **Last Updated:** January 2026
-
-> **Academic Note:** This project serves as a comprehensive demonstration of production-ready software engineering practices, including secure system design, scalable architecture, and rigorous testing methodologies. It is suitable for portfolio submission to graduate programs in Computer Science, Software Engineering, or Data Engineering.
+**Version:** 1.0.0 · **Last updated:** February 2026
