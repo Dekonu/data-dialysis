@@ -43,6 +43,17 @@ plt.style.use('seaborn-v0_8-paper')
 sns.set_palette("husl")
 
 
+def _parse_bool(value) -> bool:
+    """Parse a value as boolean; safe for string, float, int, None, or bool from CSV."""
+    if value is None or value == '':
+        return False
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value).strip().lower() in ('true', '1', 'yes')
+
+
 def load_csv_results(results_path: Path) -> List[Dict]:
     """Load benchmark results from CSV file."""
     results = []
@@ -68,7 +79,7 @@ def load_csv_results(results_path: Path) -> List[Dict]:
                 'cpu_usage_percent', 'batch_size',
             'circuit_breaker_failure_rate', 'circuit_breaker_threshold',
             'circuit_breaker_total_processed', 'circuit_breaker_total_failures',
-            'xml_memory_efficiency', 'adaptive_chunking_enabled'
+            'xml_memory_efficiency'
             ]
             for field in numeric_fields:
                 if field in row and row[field]:
@@ -79,13 +90,10 @@ def load_csv_results(results_path: Path) -> List[Dict]:
                 else:
                     row[field] = None
             
-            # Convert boolean fields
+            # Convert boolean fields (handle string, float, None, or bool from CSV)
             boolean_fields = ['circuit_breaker_opened', 'xml_streaming_enabled', 'adaptive_chunking_enabled']
             for field in boolean_fields:
-                if field in row and row[field]:
-                    row[field] = row[field].lower() in ('true', '1', 'yes')
-                else:
-                    row[field] = False
+                row[field] = _parse_bool(row.get(field)) if field in row else False
             
             # Map adapter_type to file_format for compatibility
             if 'adapter_type' in row:
@@ -465,21 +473,16 @@ def plot_format_comparison(results: List[Dict], output_path: Path):
                 format_labels.append(format_type.upper())
         
         if format_values:
-            bars = ax.bar(format_labels, format_values, 
-                         color=[format_colors[f.lower()] for f in format_labels],
-                         alpha=0.7, edgecolor='black', linewidth=1.5)
-            
-            # Add value labels on bars
-            for bar in bars:
-                height = bar.get_height()
-                if metric_name == 'throughput':
-                    label = format_large_number(height)
-                elif metric_name == 'memory_efficiency':
-                    label = f"{height:.4f}"
-                else:  # processing_time
-                    label = format_time(height)
-                ax.text(bar.get_x() + bar.get_width()/2., height,
-                       label, ha='center', va='bottom', fontweight='bold')
+            # Skip generic bar plot for processing_time; it is drawn in the branch below with ms/s handling
+            if metric_name != 'processing_time':
+                bars = ax.bar(format_labels, format_values,
+                             color=[format_colors[f.lower()] for f in format_labels],
+                             alpha=0.7, edgecolor='black', linewidth=1.5)
+                for bar in bars:
+                    height = bar.get_height()
+                    label = format_large_number(height) if metric_name == 'throughput' else f"{height:.4f}"
+                    ax.text(bar.get_x() + bar.get_width()/2., height,
+                           label, ha='center', va='bottom', fontweight='bold')
         
         # Set labels and title
         if metric_name == 'throughput':

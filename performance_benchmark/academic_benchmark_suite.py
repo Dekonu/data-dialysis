@@ -177,15 +177,6 @@ def cleanup_memory() -> None:
     """
     # Force garbage collection
     gc.collect()
-    
-    # Additional cleanup for pandas if available
-    try:
-        import pandas as pd
-        # Clear pandas options cache (if any)
-        # This is a no-op but ensures we're being thorough
-        pass
-    except ImportError:
-        pass
 
 
 def generate_single_test_file(
@@ -601,11 +592,7 @@ def benchmark_bad_data(
                             records_failed += 1
                     
                     # Explicitly delete DataFrame to free memory immediately
-                    if df_to_delete is not None:
-                        try:
-                            del df_to_delete
-                        except Exception:
-                            pass
+                    del df_to_delete
                     
                     # If storage is provided, persist the batch (this is part of processing time)
                     if storage and result.is_success():
@@ -1308,16 +1295,9 @@ def benchmark_ingestion(
                                     logger.warning(f"Failed to persist {table_name} batch: {persist_result.error}")
                 
                 # Explicitly delete DataFrames to free memory immediately after processing
-                if df_to_delete is not None:
-                    try:
-                        del df_to_delete
-                    except Exception:
-                        pass
+                del df_to_delete
                 if raw_df_to_delete is not None:
-                    try:
-                        del raw_df_to_delete
-                    except Exception:
-                        pass
+                    del raw_df_to_delete
                 
                 batch_processing_end = time.time()
                 batch_upload_time = batch_processing_start - batch_upload_start
@@ -1356,6 +1336,14 @@ def benchmark_ingestion(
         # Force garbage collection even on error
         cleanup_memory()
     
+    # Capture values from adapter and task_timing before cleanup (they are used below for metrics)
+    timings = task_timing.get_timings().copy() if 'task_timing' in locals() and task_timing else {}
+    adaptive_chunking_used = (
+        getattr(adapter, 'adaptive_chunking_enabled', False)
+        if adapter_type in ['csv', 'json'] and 'adapter' in locals()
+        else False
+    )
+    
     # Clean up pipeline and adapter before getting final memory stats
     try:
         if 'pipeline' in locals():
@@ -1368,6 +1356,7 @@ def benchmark_ingestion(
         if 'task_timing' in locals():
             del task_timing
     except Exception:
+        # Ignore cleanup failures so we still return metrics and memory stats
         pass
     
     # Force garbage collection before final memory measurement
@@ -1425,11 +1414,6 @@ def benchmark_ingestion(
         elif adapter_type == "xml":
             records_processed = int(file_size_bytes / 1050)  # ~1050 bytes per XML record
     
-    # Check if adaptive chunking was enabled (check adapter attribute)
-    adaptive_chunking_used = False
-    if adapter_type in ['csv', 'json'] and hasattr(adapter, 'adaptive_chunking_enabled'):
-        adaptive_chunking_used = adapter.adaptive_chunking_enabled
-    
     return BenchmarkMetrics(
         adapter_type=adapter_type,
         file_size_mb=file_size_mb,
@@ -1439,11 +1423,11 @@ def benchmark_ingestion(
         total_time_seconds=total_time,
         processing_time_seconds=processing_time,
         upload_time_seconds=upload_time,
-        ingestion_time_seconds=task_timing.get_timings().get('ingestion_time', 0.0),
-        processing_task_time_seconds=task_timing.get_timings().get('processing_time', 0.0),
-        persistence_time_seconds=task_timing.get_timings().get('persistence_time', 0.0),
-        raw_vault_time_seconds=task_timing.get_timings().get('raw_vault_time', 0.0),
-        cdc_time_seconds=task_timing.get_timings().get('cdc_time', 0.0),
+        ingestion_time_seconds=timings.get('ingestion_time', 0.0),
+        processing_task_time_seconds=timings.get('processing_time', 0.0),
+        persistence_time_seconds=timings.get('persistence_time', 0.0),
+        raw_vault_time_seconds=timings.get('raw_vault_time', 0.0),
+        cdc_time_seconds=timings.get('cdc_time', 0.0),
         records_per_second=records_per_second,
         mb_per_second=mb_per_second,
         peak_memory_mb=peak_memory_mb,
