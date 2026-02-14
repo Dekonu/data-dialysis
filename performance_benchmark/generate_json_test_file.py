@@ -300,7 +300,7 @@ def generate_json_file(output_path: Path, num_records: int = 200000):
     total_observations = sum(len(r["observations"]) for r in records)
     total_encounters = sum(len(r["encounters"]) for r in records)
     
-    print(f"\n✓ JSON file generated successfully!")
+    print(f"\nSUCCESS: JSON file generated successfully!")
     print(f"  File: {output_path}")
     print(f"  Size: {file_size_mb:.2f} MB ({file_size:,} bytes)")
     print(f"  Records: {len(records):,}")

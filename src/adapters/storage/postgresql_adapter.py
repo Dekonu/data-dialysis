@@ -1365,6 +1365,27 @@ class PostgreSQLAdapter(StoragePort):
                 key_id = row[2] if len(row) > 2 else 'default'
                 
                 try:
+                    # Convert encrypted_data to bytes if needed
+                    # PostgreSQL BYTEA columns may return bytes, memoryview, or string depending on psycopg2 version
+                    if isinstance(encrypted_data, memoryview):
+                        encrypted_data = bytes(encrypted_data)
+                    elif isinstance(encrypted_data, str):
+                        # If it's a hex string (PostgreSQL BYTEA output format), decode it
+                        if encrypted_data.startswith('\\x'):
+                            encrypted_data = bytes.fromhex(encrypted_data[2:])
+                        else:
+                            # Try to decode as base64 or use as-is
+                            try:
+                                import base64
+                                encrypted_data = base64.b64decode(encrypted_data)
+                            except Exception:
+                                # If base64 fails, try direct encoding
+                                encrypted_data = encrypted_data.encode('utf-8')
+                    elif not isinstance(encrypted_data, bytes):
+                        # If it's neither string, bytes, nor memoryview, skip this record
+                        logger.warning(f"Invalid encrypted data type for record {record_id}: {type(encrypted_data)}")
+                        continue
+                    
                     # Decrypt the record
                     record_dict = encryption_service.decrypt_record(encrypted_data)
                     decrypted_records.append(record_dict)

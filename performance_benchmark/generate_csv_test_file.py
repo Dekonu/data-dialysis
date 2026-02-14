@@ -459,7 +459,7 @@ def generate_csv_file(
     patients_size = patients_path.stat().st_size
     patients_size_mb = patients_size / (1024 * 1024)
     
-    print(f"\n✓ CSV file(s) generated successfully!")
+    print(f"\nSUCCESS: CSV file(s) generated successfully!")
     print(f"  Patients file: {patients_path}")
     print(f"  Size: {patients_size_mb:.2f} MB ({patients_size:,} bytes)")
     print(f"  Records: {num_records:,}")
