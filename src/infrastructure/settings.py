@@ -61,6 +61,9 @@ class Settings:
         self.circuit_breaker_enabled = os.getenv("DD_CIRCUIT_BREAKER_ENABLED", "true").lower() == "true"
         self.circuit_breaker_threshold = float(os.getenv("DD_CIRCUIT_BREAKER_THRESHOLD", "0.1"))
         self.circuit_breaker_min_requests = int(os.getenv("DD_CIRCUIT_BREAKER_MIN_REQUESTS", "10"))
+        self.circuit_breaker_window_size = int(os.getenv("DD_CIRCUIT_BREAKER_WINDOW_SIZE", "100"))
+        self.circuit_breaker_min_records = int(os.getenv("DD_CIRCUIT_BREAKER_MIN_RECORDS", "10"))
+        self.circuit_breaker_abort_on_open = os.getenv("DD_CIRCUIT_BREAKER_ABORT_ON_OPEN", "true").lower() == "true"
         
         # Security report settings
         self.save_security_report = os.getenv("DD_SAVE_SECURITY_REPORT", "true").lower() == "true"
