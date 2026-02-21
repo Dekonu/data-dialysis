@@ -45,7 +45,7 @@ def get_redaction_context() -> Optional[Dict[str, Any]]:
 
 
 def set_redaction_context(
-    logger: RedactionLogger,
+    logger: Optional[RedactionLogger],
     record_id: Optional[str] = None,
     source_adapter: Optional[str] = None,
     ingestion_id: Optional[str] = None
@@ -53,7 +53,7 @@ def set_redaction_context(
     """Set redaction context for current execution context.
     
     Parameters:
-        logger: RedactionLogger instance
+        logger: RedactionLogger instance or None (when redaction logging is disabled)
         record_id: Optional record identifier
         source_adapter: Optional source adapter identifier
         ingestion_id: Optional ingestion run identifier
@@ -74,7 +74,7 @@ def set_redaction_context(
 
 @contextmanager
 def redaction_context(
-    logger: RedactionLogger,
+    logger: Optional[RedactionLogger],
     record_id: Optional[str] = None,
     source_adapter: Optional[str] = None,
     ingestion_id: Optional[str] = None
@@ -82,7 +82,7 @@ def redaction_context(
     """Context manager for redaction logging context.
     
     Parameters:
-        logger: RedactionLogger instance
+        logger: RedactionLogger instance or None (when redaction logging is disabled)
         record_id: Optional record identifier
         source_adapter: Optional source adapter identifier
         ingestion_id: Optional ingestion run identifier

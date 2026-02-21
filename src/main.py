@@ -234,22 +234,26 @@ def cdc_task(
     table_name: str,
     ingestion_id: str,
     source_adapter: str,
-    timing_context: Optional[TaskTimingContext] = None
+    timing_context: Optional[TaskTimingContext] = None,
+    enable_cdc: bool = True,
+    enable_raw_vault: bool = True,
 ) -> Result[int]:
     """Task 5: Change Data Capture - Detect changes and log them.
     
     This task performs change detection, updates only changed fields,
     and logs changes to the audit log. It uses persist_dataframe_smart
-    which handles CDC internally.
+    when storage supports it and enable_cdc is True.
     
     Args:
         storage: Storage adapter instance
         df: Redacted DataFrame to persist
-        raw_df: Original unredacted DataFrame (for change detection)
+        raw_df: Original unredacted DataFrame (for change detection / raw vault)
         table_name: Target table name
         ingestion_id: Ingestion run ID
         source_adapter: Source adapter identifier
         timing_context: Optional timing context for performance tracking
+        enable_cdc: Whether to use CDC/smart persist when supported
+        enable_raw_vault: Whether to store raw data (encrypted) when supported
     
     Returns:
         Result with number of rows processed
@@ -258,43 +262,51 @@ def cdc_task(
         timing_context.start_task('cdc_time')
     
     try:
-        if hasattr(storage, 'persist_dataframe_smart'):
-            # persist_dataframe_smart handles CDC internally
+        if enable_cdc and hasattr(storage, 'persist_dataframe_smart'):
             return storage.persist_dataframe_smart(
                 df=df,
                 table_name=table_name,
-                raw_df=raw_df,
-                enable_cdc=True,  # Explicitly enable CDC
+                raw_df=raw_df if enable_raw_vault else None,
+                enable_cdc=True,
+                enable_raw_vault=enable_raw_vault,
                 ingestion_id=ingestion_id,
                 source_adapter=source_adapter
             )
-        else:
-            # Fallback to standard persistence (no CDC)
-            if hasattr(storage, 'persist_dataframe'):
-                return storage.persist_dataframe(df, table_name)
-            else:
-                return Result.failure_result(ValueError("Storage adapter does not support DataFrame persistence"))
+        if hasattr(storage, 'persist_dataframe'):
+            return storage.persist_dataframe(df, table_name)
+        return Result.failure_result(ValueError("Storage adapter does not support DataFrame persistence"))
     finally:
         if timing_context:
             timing_context.end_task('cdc_time')
 
 
 class IngestionPipeline:
-    """Orchestrates the complete data ingestion pipeline.
+    """Sole entry point for the data ingestion pipeline.
     
-    This class encapsulates all ingestion logic, managing shared state and
-    coordinating between ingestion, processing, persistence, and CDC tasks.
+    Orchestrates ingestion, PII redaction (via adapters/domain), validation,
+    persistence, optional raw vault (encryption), CDC, and security reporting.
+    All features are controlled by constructor flags; defaults enable safety
+    and audit without heavy optional features (e.g. NER off by default).
     
     Architecture:
-        - Encapsulates shared state (adapters, loggers, executors)
-        - Modular methods for each phase of ingestion
-        - Clear separation of concerns
+        - Single entry point: configure via flags, run process()
+        - RedactorService is used by adapters/validators; pipeline configures NER
+        - Circuit breaker, redaction logging, raw vault, CDC are pipeline options
         - Thread-safe for parallel processing
     
     Security Impact:
         - All data is validated and PII-redacted before persistence
-        - Audit trail is maintained for all operations
-        - Circuit breaker prevents cascading failures
+        - Audit trail (redaction logs) when enable_redaction_logging=True
+        - Raw vault (encryption) when enable_raw_vault=True and storage supports it
+    
+    Feature flags (all in __init__):
+        - enable_circuit_breaker: Abort batch when failure rate exceeds threshold (default True)
+        - enable_redaction_logging: Log each PII redaction for audit (default True)
+        - enable_ner: Use NER for names in unstructured text (e.g. notes); default False (runtime)
+        - enable_raw_vault: Store encrypted original rows when storage supports it (default True)
+        - enable_cdc: Change data capture / smart updates when storage supports it (default True)
+        - enable_adaptive_chunking: Adaptive CSV/JSON chunk sizes (default False)
+        - generate_security_report: Generate security report after run (default True)
     
     Example Usage:
         ```python
@@ -302,7 +314,8 @@ class IngestionPipeline:
             source="data.csv",
             storage=storage_adapter,
             xml_config_path=None,
-            batch_size=10000
+            batch_size=10000,
+            enable_ner=False,
         )
         success_count, failure_count, ingestion_id = pipeline.process()
         ```
@@ -315,7 +328,12 @@ class IngestionPipeline:
         xml_config_path: Optional[str] = None,
         batch_size: Optional[int] = None,
         enable_circuit_breaker: bool = True,
-        enable_adaptive_chunking: bool = False
+        enable_adaptive_chunking: bool = False,
+        enable_redaction_logging: bool = True,
+        enable_ner: bool = False,
+        enable_raw_vault: bool = True,
+        enable_cdc: bool = True,
+        generate_security_report: bool = True,
     ):
         """Initialize the ingestion pipeline.
         
@@ -324,9 +342,13 @@ class IngestionPipeline:
             storage: Storage adapter instance
             xml_config_path: Optional XML configuration file path (for XML sources)
             batch_size: Optional batch size for processing (overrides settings)
-            enable_circuit_breaker: Whether to enable circuit breaker for failure detection
-            enable_adaptive_chunking: Whether to enable adaptive chunking for CSV/JSON adapters
-                                    (default: False, uses target_total_rows=0 to disable)
+            enable_circuit_breaker: Enable circuit breaker for failure detection (default True)
+            enable_adaptive_chunking: Adaptive chunk sizes for CSV/JSON (default False)
+            enable_redaction_logging: Log PII redactions for audit (default True)
+            enable_ner: Use NER for names in unstructured text/notes (default False; runtime impact)
+            enable_raw_vault: Store encrypted raw data when storage supports it (default True)
+            enable_cdc: Change data capture when storage supports it (default True)
+            generate_security_report: Generate security report after process (default True)
         """
         self.source = source
         self.storage = storage
@@ -334,6 +356,11 @@ class IngestionPipeline:
         self.batch_size = batch_size or settings.batch_size
         self.enable_circuit_breaker = enable_circuit_breaker
         self.enable_adaptive_chunking = enable_adaptive_chunking
+        self.enable_redaction_logging = enable_redaction_logging
+        self.enable_ner = enable_ner
+        self.enable_raw_vault = enable_raw_vault
+        self.enable_cdc = enable_cdc
+        self.generate_security_report = generate_security_report
         
         # Will be initialized in initialize()
         self.adapter: Optional[Any] = None
@@ -358,14 +385,21 @@ class IngestionPipeline:
         Raises:
             RuntimeError: If initialization fails
         """
+        # Configure NER (used by RedactorService for unstructured text/notes)
+        self._configure_ner()
+        
         # Initialize ingestion adapter
         self._initialize_adapter()
         
         # Initialize storage schema
         self._initialize_schema()
         
-        # Initialize redaction logging
-        self._initialize_redaction_logging()
+        # Initialize redaction logging when enabled
+        if self.enable_redaction_logging:
+            self._initialize_redaction_logging()
+        else:
+            self.redaction_logger = None
+            self.ingestion_id = str(uuid.uuid4())  # Still set for context/tracing
         
         # Initialize circuit breaker
         if self.enable_circuit_breaker:
@@ -373,6 +407,22 @@ class IngestionPipeline:
         
         # Initialize executors
         self._initialize_executors()
+    
+    def _configure_ner(self) -> None:
+        """Configure NER adapter for RedactorService (unstructured text/notes only)."""
+        from src.domain.services import RedactorService
+        if self.enable_ner:
+            try:
+                from src.infrastructure.ner.spacy_adapter import SpaCyNERAdapter
+                model_name = getattr(settings, 'spacy_model', 'en_core_web_sm')
+                RedactorService.set_ner_adapter(SpaCyNERAdapter(model_name=model_name))
+                logger.info("NER enabled for pipeline (unstructured text/notes)")
+            except Exception as e:
+                logger.warning(f"NER requested but failed to load: {e}; using regex-only redaction")
+                RedactorService.set_ner_adapter(None)
+        else:
+            RedactorService.set_ner_adapter(None)
+            logger.debug("NER disabled for pipeline")
     
     def _initialize_adapter(self) -> None:
         """Initialize the ingestion adapter based on source format."""
@@ -463,7 +513,7 @@ class IngestionPipeline:
             f"(batch size: {self.batch_size})"
         )
         
-        # Set redaction context for this ingestion run
+        # Set redaction context for this ingestion run (logger may be None if logging disabled)
         with redaction_context(
             logger=self.redaction_logger,
             source_adapter=self.adapter.adapter_name,
@@ -492,6 +542,10 @@ class IngestionPipeline:
             except Exception as e:
                 logger.error(f"Error during ingestion: {e}", exc_info=True)
                 raise
+        
+        # Generate security report when enabled and storage supports it
+        if self.generate_security_report:
+            self._maybe_generate_security_report()
         
         return self.success_count, self.failure_count, self.ingestion_id
     
@@ -539,13 +593,16 @@ class IngestionPipeline:
         
         # For now, persist immediately (simplified version)
         # Full implementation would collect chunks for parallel processing
+        raw_df_for_vault = raw_df if self.enable_raw_vault else None
         persist_result = cdc_task(
             self.storage,
             df,
-            raw_df,
+            raw_df_for_vault,
             table_name,
             self.ingestion_id,
-            self.adapter.adapter_name
+            self.adapter.adapter_name,
+            enable_cdc=self.enable_cdc,
+            enable_raw_vault=self.enable_raw_vault,
         )
         
         if persist_result.is_success():
@@ -612,6 +669,29 @@ class IngestionPipeline:
             except Exception as e:
                 logger.error(f"Error flushing redaction logs: {e}", exc_info=True)
     
+    def _maybe_generate_security_report(self) -> None:
+        """Generate security report when storage supports it."""
+        if not hasattr(self.storage, 'generate_security_report'):
+            return
+        try:
+            report_result = generate_security_report(
+                self.storage,
+                ingestion_id=self.ingestion_id,
+            )
+            if report_result.is_success() and settings.save_security_report:
+                report_dir = Path(settings.security_report_dir)
+                report_dir.mkdir(parents=True, exist_ok=True)
+                output_path = str(report_dir / f"security_report_{self.ingestion_id or 'run'}.json")
+                save_result = generate_security_report(
+                    self.storage,
+                    output_path=output_path,
+                    ingestion_id=self.ingestion_id,
+                )
+                if not save_result.is_success():
+                    logger.warning(f"Failed to save security report: {save_result.error}")
+        except Exception as e:
+            logger.warning(f"Failed to generate security report: {e}")
+
     def cleanup(self) -> None:
         """Clean up resources (executors, connections, etc.)."""
         if self.flush_executor:
@@ -619,8 +699,8 @@ class IngestionPipeline:
         if self.chunk_executor:
             self.chunk_executor.shutdown(wait=True)
         
-        # Flush remaining redaction logs
-        if self.redaction_logger and hasattr(self.storage, 'flush_redaction_logs'):
+        # Flush remaining redaction logs when logging is enabled
+        if self.enable_redaction_logging and self.redaction_logger and hasattr(self.storage, 'flush_redaction_logs'):
             try:
                 redaction_logs = self.redaction_logger.get_logs()
                 if redaction_logs:

@@ -1632,6 +1632,7 @@ class PostgreSQLAdapter(StoragePort):
         table_name: str,
         raw_df: Optional[pd.DataFrame] = None,
         enable_cdc: bool = True,
+        enable_raw_vault: bool = True,
         ingestion_id: Optional[str] = None,
         source_adapter: Optional[str] = None
     ) -> Result[int]:
@@ -1639,17 +1640,20 @@ class PostgreSQLAdapter(StoragePort):
         
         This method implements Change Data Capture (CDC) by:
         1. Storing redacted data in main tables
-        2. Storing original data in raw vault (encrypted)
-        3. Fetching existing raw records from vault (decrypted)
-        4. Detecting field-level changes using original values (not redacted)
+        2. Optionally storing original data in raw vault (encrypted) when enable_raw_vault
+        3. Fetching existing records for change detection:
+           - When enable_raw_vault=True: fetches from raw vault (decrypted, original values)
+           - When enable_raw_vault=False: fetches from main table (redacted values)
+        4. Detecting field-level changes
         5. Only updating changed fields (performance optimization)
         6. Logging all changes to change_audit_log with encrypted original values
         
         Parameters:
             df: Validated pandas DataFrame (PII already redacted) - goes to main tables
             table_name: Target table name
-            raw_df: Original unredacted DataFrame - goes to raw vault (optional, defaults to df if not provided)
+            raw_df: Original unredacted DataFrame - goes to raw vault (optional)
             enable_cdc: Whether to enable CDC (default: True)
+            enable_raw_vault: Whether to persist to raw vault (default: True)
             ingestion_id: ID of the ingestion run (for change logging)
             source_adapter: Source adapter identifier (for change logging)
             
@@ -1678,32 +1682,40 @@ class PostgreSQLAdapter(StoragePort):
             return self.persist_dataframe(df, table_name)
         
         try:
-            # Use raw_df if provided, otherwise fall back to df (for backward compatibility)
-            # Note: If raw_df is not provided, CDC will compare redacted values (not ideal)
-            raw_data_df = raw_df if raw_df is not None else df
-            encryption_service = self._get_encryption_service()
+            # Use raw_df if provided and raw vault enabled, otherwise fall back to df for CDC comparison
+            raw_data_df = (raw_df if raw_df is not None else df) if enable_raw_vault else df
             
             # Step 1: Store redacted data in main tables
             result = self.persist_dataframe(df, table_name)
             if not result.is_success():
                 return result
             
-            # Step 2: Store original data in raw vault (encrypted)
-            raw_vault_result = self._persist_raw_data_vault(
-                raw_data_df,
-                table_name,
-                ingestion_id=ingestion_id,
-                source_adapter=source_adapter
-            )
-            if not raw_vault_result.is_success():
-                logger.warning(f"Failed to persist to raw vault for {table_name}: {raw_vault_result.error}")
-                # Continue with CDC using redacted data as fallback
+            # Step 2: Store original data in raw vault (encrypted) when enabled
+            if enable_raw_vault and raw_df is not None:
+                raw_vault_result = self._persist_raw_data_vault(
+                    raw_df,
+                    table_name,
+                    ingestion_id=ingestion_id,
+                    source_adapter=source_adapter
+                )
+                if not raw_vault_result.is_success():
+                    logger.warning(f"Failed to persist to raw vault for {table_name}: {raw_vault_result.error}")
+            
+            # For CDC comparison and change logging use raw data when available and raw vault
+            # is enabled, otherwise fall back to redacted df
+            # NOTE: raw_data_df was set above on line 1684 based on enable_raw_vault; do not override here
             
             # Step 3: Get unique record IDs from DataFrame
             record_ids = df[primary_key].unique().tolist()
             
-            # Step 4: Fetch existing raw records from vault (decrypted) for change detection
-            existing_raw_df = self._fetch_raw_records_decrypted(record_ids, table_name, primary_key)
+            # Step 4: Fetch existing records for change detection
+            # When raw vault is enabled, fetch from raw vault (has original unredacted values)
+            # When raw vault is disabled, fetch from main table to avoid unnecessary raw-vault
+            # reads/decryption and to respect the intent of not handling sensitive unredacted data
+            if enable_raw_vault:
+                existing_raw_df = self._fetch_raw_records_decrypted(record_ids, table_name, primary_key)
+            else:
+                existing_raw_df = self._bulk_fetch_existing_records(record_ids, table_name, primary_key)
             
             # Import ChangeDetector and ChangeAuditLogger
             from src.domain.services.change_detector import ChangeDetector

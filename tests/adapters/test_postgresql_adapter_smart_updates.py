@@ -396,6 +396,38 @@ class TestPersistDataframeSmart:
         assert result.is_success()
         assert result.value == 0
     
+    def test_persist_dataframe_smart_raw_vault_disabled_uses_main_table_fetch(
+        self, mock_psycopg2, mock_sqlalchemy, postgresql_adapter
+    ):
+        """Test that when enable_raw_vault=False, main table is fetched instead of raw vault."""
+        df = pd.DataFrame({
+            'patient_id': ['P001', 'P002'],
+            'family_name': ['Smith', 'Jones'],
+            'city': ['Boston', 'New York']
+        })
+
+        with patch.object(postgresql_adapter, '_fetch_raw_records_decrypted') as mock_raw_fetch, \
+             patch.object(postgresql_adapter, '_bulk_fetch_existing_records') as mock_main_fetch, \
+             patch.object(postgresql_adapter, 'persist_dataframe') as mock_persist, \
+             patch.object(postgresql_adapter, 'flush_change_logs') as mock_flush:
+
+            mock_main_fetch.return_value = pd.DataFrame()
+            mock_persist.return_value = Result.success_result(2)
+            mock_flush.return_value = Result.success_result(4)
+
+            result = postgresql_adapter.persist_dataframe_smart(
+                df, 'patients', enable_cdc=True, enable_raw_vault=False,
+                ingestion_id='ing-123', source_adapter='csv_ingester'
+            )
+
+            assert result.is_success()
+            # Main table fetch should be used when raw vault is disabled
+            mock_main_fetch.assert_called_once_with(
+                ['P001', 'P002'], 'patients', 'patient_id'
+            )
+            # Raw vault should NOT be accessed when disabled
+            mock_raw_fetch.assert_not_called()
+
     def test_persist_dataframe_smart_logs_changes(self, mock_psycopg2, mock_sqlalchemy, postgresql_adapter):
         """Test that smart persist logs changes correctly."""
         df = pd.DataFrame({
