@@ -1641,8 +1641,10 @@ class PostgreSQLAdapter(StoragePort):
         This method implements Change Data Capture (CDC) by:
         1. Storing redacted data in main tables
         2. Optionally storing original data in raw vault (encrypted) when enable_raw_vault
-        3. Fetching existing raw records from vault (decrypted)
-        4. Detecting field-level changes using original values (not redacted)
+        3. Fetching existing records for change detection:
+           - When enable_raw_vault=True: fetches from raw vault (decrypted, original values)
+           - When enable_raw_vault=False: fetches from main table (redacted values)
+        4. Detecting field-level changes
         5. Only updating changed fields (performance optimization)
         6. Logging all changes to change_audit_log with encrypted original values
         
@@ -1699,14 +1701,21 @@ class PostgreSQLAdapter(StoragePort):
                 if not raw_vault_result.is_success():
                     logger.warning(f"Failed to persist to raw vault for {table_name}: {raw_vault_result.error}")
             
-            # For CDC comparison and change logging use raw data when available, else redacted df
-            raw_data_df = raw_df if raw_df is not None else df
+            # For CDC comparison and change logging use raw data when available and raw vault
+            # is enabled, otherwise fall back to redacted df
+            # NOTE: raw_data_df was set above on line 1684 based on enable_raw_vault; do not override here
             
             # Step 3: Get unique record IDs from DataFrame
             record_ids = df[primary_key].unique().tolist()
             
-            # Step 4: Fetch existing raw records from vault (decrypted) for change detection
-            existing_raw_df = self._fetch_raw_records_decrypted(record_ids, table_name, primary_key)
+            # Step 4: Fetch existing records for change detection
+            # When raw vault is enabled, fetch from raw vault (has original unredacted values)
+            # When raw vault is disabled, fetch from main table to avoid unnecessary raw-vault
+            # reads/decryption and to respect the intent of not handling sensitive unredacted data
+            if enable_raw_vault:
+                existing_raw_df = self._fetch_raw_records_decrypted(record_ids, table_name, primary_key)
+            else:
+                existing_raw_df = self._bulk_fetch_existing_records(record_ids, table_name, primary_key)
             
             # Import ChangeDetector and ChangeAuditLogger
             from src.domain.services.change_detector import ChangeDetector
